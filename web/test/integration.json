@@ -1,0 +1,95 @@
+{
+  "master": "演示管理密码-2026!",
+  "passwords": [
+    "123456_qwerty",
+    "中文🙂\n第二行\\",
+    "﻿开头保留",
+    ""
+  ],
+  "book": {
+    "version": 1,
+    "book_code": "3e46697fd4cb7642e44241fbf036ac53",
+    "entries": [
+      {
+        "service": "百度 · 演示",
+        "addresses": "example.invalid",
+        "code": "demo-0",
+        "username": "demo-user-0",
+        "nickname": "大马",
+        "notes": "这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。",
+        "rules": {
+          "length": 12,
+          "categories": 3,
+          "allowed": "ULDS",
+          "symbols": "!@#$%^&*_-+=.?"
+        },
+        "algorithm": "XCHACHA20-POLY1305",
+        "memory_kib": 65536,
+        "iterations": 3,
+        "lanes": 4,
+        "salt": "d4f961644e4bbdb01801927d00bef9c1",
+        "data": "mCUX+3a3fKSgqPrO9dKYp4XXcHgowCeW8MrZk7nszQv4EfdWBh/JMb+xeiCytCAPRvZkRSNdJNdxR1AbdZio0rjxfJM6CXo="
+      },
+      {
+        "service": "服务器 SSH",
+        "addresses": "example.invalid",
+        "code": "demo-1",
+        "username": "demo-user-1",
+        "nickname": "大马",
+        "notes": "这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。",
+        "rules": {
+          "length": 12,
+          "categories": 3,
+          "allowed": "ULDS",
+          "symbols": "!@#$%^&*_-+=.?"
+        },
+        "algorithm": "CHACHA20-POLY1305",
+        "memory_kib": 65536,
+        "iterations": 3,
+        "lanes": 4,
+        "salt": "f7f45a673772e956d99b2ba464470feb",
+        "data": "+A0emdKE5KIyLDGLRZbrMEJmccZCV6km2tiituVTvqeXB9rTOjzMppB3WolqTb8ttXL2tuPzvzRtFn5n6CGmRYLaLQ=="
+      },
+      {
+        "service": "个人邮箱",
+        "addresses": "example.invalid",
+        "code": "demo-2",
+        "username": "demo-user-2",
+        "nickname": "大马",
+        "notes": "这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。",
+        "rules": {
+          "length": 12,
+          "categories": 3,
+          "allowed": "ULDS",
+          "symbols": "!@#$%^&*_-+=.?"
+        },
+        "algorithm": "AES-256-GCM",
+        "memory_kib": 65536,
+        "iterations": 3,
+        "lanes": 4,
+        "salt": "5c00218d098f2d6444a157b493349383",
+        "data": "3iAJc27q6pdmN7ziKHUG5ceGbzDrGaf4feINRif5SPEb/8ztapSxp2uK9TY/QpvN/Yjrn0Kqi0TNXz7zNA=="
+      },
+      {
+        "service": "空密码测试",
+        "addresses": "example.invalid",
+        "code": "demo-3",
+        "username": "demo-user-3",
+        "nickname": "大马",
+        "notes": "这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。",
+        "rules": {
+          "length": 12,
+          "categories": 3,
+          "allowed": "ULDS",
+          "symbols": "!@#$%^&*_-+=.?"
+        },
+        "algorithm": "XCHACHA20-POLY1305",
+        "memory_kib": 65536,
+        "iterations": 3,
+        "lanes": 4,
+        "salt": "27857692c33efaff517ff5464c93384f",
+        "data": "bpqo4OXzJ0TKtAyQQ98sZioy3OxXJLpftayoAFMuH5Eg1sCsf2sVIRdamtPfJclYA60qGhI4ADsMYQ=="
+      }
+    ]
+  }
+}

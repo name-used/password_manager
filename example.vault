@@ -1,0 +1,18 @@
+[账本]
+格式：1
+校验码：de9ca9233924b5bc3ff0dcfc20206d79
+
+[条目]
+服务名：百度 · 演示条目
+应用地址：www.baidu.com、api.baidu.com
+服务编码：baidu
+用户名：demo-user
+昵称：演示账户
+密码规则：长度>=12;类别>=3;字符=ULDS
+可用符号：!@#$%^&*_-+=.?
+加密算法：XCHACHA20-POLY1305
+内存KiB：65536
+迭代次数：3
+并行通道：4
+随机码：211fd25f854fb901235a4ae49bd19045
+密码密文：LvQ8Bwu8+ETkjmdyBPt1htyNiq/m6ojEyB0vLkC8/Pc10Trhqt09oosV6ndWgbSChf29XGNFoSS13YrSG9uTcj36QW7MI2c=

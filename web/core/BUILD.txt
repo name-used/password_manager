@@ -1,0 +1,47 @@
+Argon2id WebAssembly 构建记录 · 2026-10-27
+共用源码位于项目根目录 core/argon2id.c 与 core/argon2id.h；相对本目录为 ../../core/。
+2026-11-07 合并项目时核对了源码摘要，算法源码和已有 Wasm 产物均未改动。
+没有线程、SIMD 或第三方加密实现。只链接标准 C 内存操作和分配器，运行时不需要外部库。
+标准 C 支持的许可声明见 THIRD_PARTY_NOTICES.txt；分发单文件 HTML 时也应保留这些通知。
+
+构建工具
+官方 wasi-sdk 34.0，Linux x86_64 便携解包使用，未安装到系统。
+https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.deb
+下载大小：133,920,502 字节。
+发布 SHA256：09f37a478107bf30381e0d8922ac678ebe998de59e574f96830f08e520908d4a
+下载文件 SHA256 与上述发布摘要一致。
+编译在已有 insoulface-upstream-builder:1.2.7 的临时容器内进行；无网络、根文件系统只读，退出即删除。
+wasi-sdk-34 标签的 wasi-libc 固定提交为 2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13。
+实际链接清单包含 libc 的 abort、sbrk、dlmalloc、exit、errno；没有链接 compiler-rt 档案成员。
+
+编译命令（Linux shell，当前目录为本目录，SDK 位于 /opt/wasi-sdk）
+/opt/wasi-sdk/bin/clang -std=c99 -O3 -Wall -Wextra -Wpedantic -Werror -fvisibility=hidden -mno-simd128 -nostartfiles \
+  -Wl,--no-entry -Wl,--export=vault_argon2id -Wl,--export=malloc -Wl,--export=free -Wl,--export-memory -Wl,--strip-all \
+  -Wl,--initial-memory=131072 -Wl,--max-memory=134217728 -Wl,-z,stack-size=65536 ../../core/argon2id.c -o argon2id.wasm
+
+产物与调用约定
+argon2id.wasm：16,383 字节。
+SHA256：f365486c44d0786078426abd5e05f5db968857bf38dfbf586bff19b83c2d4855
+WebAssembly.Module.imports(module)：[]，没有 WASI 或其他宿主函数导入。
+导出：memory、vault_argon2id、malloc、free。
+vault_argon2id 的参数顺序与 ../../core/argon2id.h 一致；指针是 Wasm 线性内存中的字节偏移。
+JS 需先 malloc 输入/输出并写入数据，调用后复制输出到独立数组，再 free 调用者分配的小缓冲。
+malloc 或核心调用可能增长线性内存；此后必须从最新 memory.buffer 重建视图，不能使用增长前的视图。
+初始线性内存 128 KiB，最大 128 MiB，栈 64 KiB；该上限是本性能验证产物的构建设置。
+64 MiB 参数派生后的实际线性内存为 67,239,936 字节。free 允许后续复用空间，不缩小 Wasm 内存容量。
+这里未增加秘密清零承诺；算法内部分配的工作区仍采用原实现的 malloc/free 生命周期。
+
+真实验证
+Node.js 成功实例化，无宿主导入对象。
+RFC 9106 Argon2id 含 secret/ad 的官方向量通过：
+  0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659
+64 MiB / 3 遍 / 4 通道固定答案通过：
+  密码字节：synthetic-benchmark-password
+  盐字节：synthetic-salt16
+  输出32字节：2ca4709ac3c8620a5b2d3974d7279adeab318f8413863d61204cfe7096e4898e
+上述为正确性验证，不是完整解密速度或手机设备性能结论。
+
+源码一致性
+argon2id.c SHA256：ef78a6b83d1345d72f2c505fc1800e41df2a8ba75c7c1bfc75c617ee043e4591
+argon2id.h SHA256：372288a590b04fa58775476ea32d76a93b79fb7f77b8c3c68ad9c72a60cc1bff
+项目根目录 core 下的两个文件与以上 SHA256 分别相同。

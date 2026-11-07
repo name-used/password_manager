@@ -1,0 +1,67 @@
+[账本]
+格式：1
+校验码：3e46697fd4cb7642e44241fbf036ac53
+
+[条目]
+服务名：百度 · 演示
+应用地址：example.invalid
+服务编码：demo-0
+用户名：demo-user-0
+昵称：大马
+备注：这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。
+密码规则：长度>=12;类别>=3;字符=ULDS
+可用符号：!@#$%^&*_-+=.?
+加密算法：XCHACHA20-POLY1305
+内存KiB：65536
+迭代次数：3
+并行通道：4
+随机码：d4f961644e4bbdb01801927d00bef9c1
+密码密文：mCUX+3a3fKSgqPrO9dKYp4XXcHgowCeW8MrZk7nszQv4EfdWBh/JMb+xeiCytCAPRvZkRSNdJNdxR1AbdZio0rjxfJM6CXo=
+
+[条目]
+服务名：服务器 SSH
+应用地址：example.invalid
+服务编码：demo-1
+用户名：demo-user-1
+昵称：大马
+备注：这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。
+密码规则：长度>=12;类别>=3;字符=ULDS
+可用符号：!@#$%^&*_-+=.?
+加密算法：CHACHA20-POLY1305
+内存KiB：65536
+迭代次数：3
+并行通道：4
+随机码：f7f45a673772e956d99b2ba464470feb
+密码密文：+A0emdKE5KIyLDGLRZbrMEJmccZCV6km2tiituVTvqeXB9rTOjzMppB3WolqTb8ttXL2tuPzvzRtFn5n6CGmRYLaLQ==
+
+[条目]
+服务名：个人邮箱
+应用地址：example.invalid
+服务编码：demo-2
+用户名：demo-user-2
+昵称：大马
+备注：这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。
+密码规则：长度>=12;类别>=3;字符=ULDS
+可用符号：!@#$%^&*_-+=.?
+加密算法：AES-256-GCM
+内存KiB：65536
+迭代次数：3
+并行通道：4
+随机码：5c00218d098f2d6444a157b493349383
+密码密文：3iAJc27q6pdmN7ziKHUG5ceGbzDrGaf4feINRif5SPEb/8ztapSxp2uK9TY/QpvN/Yjrn0Kqi0TNXz7zNA==
+
+[条目]
+服务名：空密码测试
+应用地址：example.invalid
+服务编码：demo-3
+用户名：demo-user-3
+昵称：大马
+备注：这是虚构演示数据。\n中文备注、换行与反斜线 \\ 都会保留。
+密码规则：长度>=12;类别>=3;字符=ULDS
+可用符号：!@#$%^&*_-+=.?
+加密算法：XCHACHA20-POLY1305
+内存KiB：65536
+迭代次数：3
+并行通道：4
+随机码：27857692c33efaff517ff5464c93384f
+密码密文：bpqo4OXzJ0TKtAyQQ98sZioy3OxXJLpftayoAFMuH5Eg1sCsf2sVIRdamtPfJclYA60qGhI4ADsMYQ==

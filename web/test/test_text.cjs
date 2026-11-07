@@ -1,0 +1,123 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+async function main() {
+    const instantiate = WebAssembly.instantiate;
+    let derivations = 0;
+    WebAssembly.instantiate = async () => { ++derivations; throw new Error('Unexpected derivation'); };
+    const text = require('../core/text_decoder.js');
+    const process = require('../core/process.js');
+    const source = fs.readFileSync(path.join(__dirname, 'legacy.vault'), 'utf8');
+    const book = text.decode(source);
+    assert.equal(book.entries.length, 1);
+    assert.equal(book.version, 1);
+    assert.equal(derivations, 0);
+    assert.deepEqual(text.decode('\uFEFF' + source.replace(/\r?\n/g, '\r\n')), book);
+    const withNotes = source.replace('[条目]', '[条目]\n备注： 中文\\n第二行\\t\\\\ ：🙂 ');
+    assert.equal(text.decode(withNotes).entries[0].notes, ' 中文\n第二行\t\\ ：🙂 ');
+    const appended = source + '\n' + source.slice(source.indexOf('[条目]'));
+    assert.equal(text.decode(appended).entries.length, 2);
+    // Move the existing Python-generated entry parameters to the header without changing its ciphertext.
+    const version2 = source.replace(/^(?:内存KiB|迭代次数)：[^\r\n]*\r?\n/gm, '')
+        .replace('格式：1', '格式：2\n内存KiB：65536\n迭代次数：3');
+    const shared = text.decode(version2);
+    assert.deepEqual(shared, {...book, version: 2, memory_kib: 65536, iterations: 3});
+    const sharedHeader = version2.slice(0, version2.indexOf('[条目]'));
+    assert.deepEqual(text.decode(sharedHeader), {...shared, entries: []});
+    assert.throws(() => text.decode(sharedHeader.replace('内存KiB：65536\n', '')), /缺少字段.*内存KiB/);
+    assert.throws(() => text.decode(sharedHeader.replace('迭代次数：3', '迭代次数：0')), /迭代次数.*整数/);
+    assert.throws(() => text.decode(sharedHeader.replace('内存KiB：65536', '内存KiB：7')), /内存KiB.*整数/);
+    assert.throws(() => text.decode(sharedHeader.replace('内存KiB：65536', '内存KiB：65536\n内存KiB：65536')), /内存KiB.*重复/);
+    assert.throws(() => text.decode(sharedHeader.replace('格式：2', '格式：1')), /格式 1.*不能包含/);
+    assert.throws(() => text.decode(version2.replace('内存KiB：65536', '内存KiB：8')), /内存KiB.*32/);
+    for (const field of ['内存KiB：65536', '迭代次数：3']) {
+        assert.throws(() => text.decode(version2.replace('[条目]', `[条目]\n${field}`)), /格式 2.*不能包含/);
+    }
+    const malformed = [
+        source + '\n密码明文：secret',
+        source + '\n管理密码：secret',
+        source + '\n备注：one\n备注：two',
+        source.replace('服务名：', '服务名:'),
+        source.replace('格式：1', '格式：3'),
+        source + '\n[账本]\n格式：1\n校验码：' + book.book_code,
+        source.replace(/服务名：[^\n]*\n/, ''),
+        source.replace('内存KiB：65536', '内存KiB：4294967296'),
+        source.replace('迭代次数：3', '迭代次数：3\\n'),
+        source.replace(/字符=ULDS/, '字符=ULDS\\n'),
+        source.replace(`校验码：${book.book_code}`, `校验码：${book.book_code}\\n`),
+        source + '\n备注：\\q',
+        source + '\n备注：raw\ttab',
+    ];
+    for (const value of malformed) assert.throws(() => text.decode(value));
+    assert.throws(() => text.decode(source.replace('迭代次数：3', '迭代次数：1.5')), /“迭代次数”应填写整数/);
+    assert.throws(() => text.base64Bytes('Zh=='), /规范/);
+    assert.throws(() => text.base64Bytes('Zg='));
+    assert.throws(() => text.validateEntry({...book.entries[0], password: 'should-not-exist'}));
+    assert.throws(() => text.validateEntry({...book.entries[0], salt: book.entries[0].salt + '\n'}));
+    assert.throws(() => text.validateEntry({...book.entries[0], rules: {...book.entries[0].rules, allowed: 'ULDS\n'}}));
+    for (const master of ['', '\uD800', '\uDC00']) await assert.rejects(process.decrypt(book.book_code, book.entries[0], master));
+    await assert.rejects(process.decrypt(book.book_code, {...book.entries[0], data: 'AA=='}, 'master'), /长度/);
+    await assert.rejects(process.decrypt(book.book_code, {...book.entries[0], salt: '', data: ''}, 'master'), /还没有/);
+    await assert.rejects(process.decrypt(book.book_code, {...book.entries[0], memory_kib: 131072}, 'master'), /128 MiB/);
+    assert.equal(derivations, 0);
+
+    WebAssembly.instantiate = async (...args) => { ++derivations; return instantiate(...args); };
+    globalThis.VAULT_WASM_BASE64 = fs.readFileSync(path.join(__dirname, '../core/argon2id.wasm')).toString('base64');
+    const payloadPassword = '\uFEFF中文🙂\n\t\\ ：';
+    const encoded = new TextEncoder().encode(payloadPassword);
+    const payload = new Uint8Array(18 + encoded.length);
+    payload.set(Buffer.from(book.book_code, 'hex'));
+    payload[16] = encoded.length >>> 8;
+    payload[17] = encoded.length & 255;
+    payload.set(encoded, 18);
+    const entry = {...book.entries[0], salt: Buffer.from('synthetic-salt16').toString('hex')};
+    let decryptCalls = 0;
+    globalThis.VaultCiphers = {decrypt(algorithm, key, nonce, ciphertext) {
+        ++decryptCalls;
+        assert.equal(algorithm, entry.algorithm);
+        assert.equal(Buffer.from(key).toString('hex'), '2ca4709ac3c8620a5b2d3974d7279adeab318f8413863d61204cfe7096e4898e');
+        assert.equal(nonce.length, 24);
+        assert(ciphertext.length >= 34);
+        return payload;
+    }};
+    const entryBefore = JSON.stringify(entry);
+    const result = await process.decrypt(book.book_code, entry, 'synthetic-benchmark-password');
+    assert.equal(result, payloadPassword);
+    assert.equal(JSON.stringify(entry), entryBefore);
+    assert.equal(derivations, 1);
+    assert.equal(decryptCalls, 1);
+    WebAssembly.instantiate = instantiate;
+    globalThis.VaultCiphers = require('../core/ciphers.js');
+    assert.equal(await process.decrypt(book.book_code, book.entries[0], '演示管理密码-2026!'), '123456_qwerty');
+    assert.equal(await process.decrypt(shared.book_code, shared.entries[0], '演示管理密码-2026!'), '123456_qwerty');
+    const changedShared = text.decode(version2.replace('迭代次数：3', '迭代次数：2'));
+    await assert.rejects(process.decrypt(changedShared.book_code, changedShared.entries[0], '演示管理密码-2026!'), /管理密码错误/);
+    await assert.rejects(process.decrypt(book.book_code, book.entries[0], 'wrong master'), /管理密码错误/);
+    const targetCode = '00'.repeat(16);
+    const target = text.decode(`[账本]\n格式：1\n校验码：${targetCode}\n\n` + source.slice(source.indexOf('[条目]')));
+    assert.deepEqual(target.entries, book.entries);
+    assert.equal(await process.decrypt(target.book_code, target.entries[0], '演示管理密码-2026!'), '123456_qwerty');
+    for (const position of [0, 30, -1]) {
+        const bytes = Buffer.from(book.entries[0].data, 'base64');
+        bytes[position < 0 ? bytes.length - 1 : position] ^= 1;
+        await assert.rejects(process.decrypt(book.book_code, {...book.entries[0], data: bytes.toString('base64')}, '演示管理密码-2026!'), /管理密码错误/);
+    }
+    // Generated by the existing Python AEAD implementation and native C KDF, not by this JS implementation.
+    const fixtures = [
+        {algorithm: 'AES-256-GCM', password: '', data: 'AAECAwQFBgcICQoLhyzrXor0eCkuxCne+LUVgaKocY6Tf0tDs5wRYEQ1tzzIFQ=='},
+        {algorithm: 'CHACHA20-POLY1305', password: '\uFEFF中文🙂\n\t\\ ： ',
+         data: 'AAECAwQFBgcICQoLjrfSGJ557mvFjiZBlnMQXmULYfnwRTLYB3ozKVh/E+XEoUa9rriMbXzo99p3D/u8XL2PFFaHPw=='},
+        {algorithm: 'XCHACHA20-POLY1305', password: ' spaces 🙂 ',
+         data: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYX5FCGOuvu7KdCTUwrxDD22hc1HO2jB76AK6Vd8dK+ugoVGo4bYXmTqV3HVxhf2Pc='},
+    ];
+    for (const fixture of fixtures) {
+        const item = {...book.entries[0], algorithm: fixture.algorithm, data: fixture.data,
+                      salt: '000102030405060708090a0b0c0d0e0f', memory_kib: 32, iterations: 1, lanes: 1};
+        assert.equal(await process.decrypt('a1'.repeat(16), item, '合成管理密码🙂\uFEFF'), fixture.password);
+    }
+    console.log('Format 1/2 validation, header parameter authentication, notes/Unicode, lazy derivation, full-parameter key and all three Python cipher payloads passed.');
+}
+
+main().catch(error => { console.error(error); process.exitCode = 1; });
