@@ -55,7 +55,7 @@ class ProcessTests(unittest.TestCase):
             entry = sample_entry(algorithm)
             parameters = {'book_code': self.book_code, 'entry': entry}
             original = deepcopy(parameters)
-            for password in ('', '123456_qwerty', ' 中文🙂\n\t\\ ： '):
+            for password in ('', '123456_qwerty', 'Oo0Iil', ' 中文🙂\n\t\\ ： '):
                 with self.subTest(algorithm=algorithm, password=password):
                     encrypted = process('encrypt', parameters, self.master, password)
                     self.assertEqual(parameters, original)
@@ -128,8 +128,8 @@ class ProcessTests(unittest.TestCase):
             text_process('decrypt', encrypted, -1, self.master)
 
     def test_generation_uses_minimum_satisfying_length(self):
-        groups = ('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789', '!@#')
-        for allowed in ('U', 'LD', 'ULDS', 'S'):
+        groups = ('ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghjkmnpqrstuvwxyz', '123456789', '!@#')
+        for allowed in ('U', 'D', 'LD', 'ULDS', 'S'):
             for minimum in (1, 8, 12):
                 for count in range(1, len(allowed) + 1):
                     rules = {'length': minimum, 'categories': count, 'allowed': allowed, 'symbols': '!@#'}

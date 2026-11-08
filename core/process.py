@@ -19,6 +19,7 @@ from .text_decoder import (
 
 
 _VERIFIER_PLAINTEXT = b'LOCALVAULT-CHECK\x00\x00'
+_EXCLUDE_AMBIGUOUS = str.maketrans('', '', 'Oo0Iil')
 
 
 def process(action, parameters, master='', password=None):
@@ -26,7 +27,7 @@ def process(action, parameters, master='', password=None):
     if action == 'generate':
         validate_rules(parameters)
         groups = {'U': ascii_uppercase, 'L': ascii_lowercase, 'D': digits, 'S': parameters['symbols']}
-        groups = [groups[name] for name in parameters['allowed']]
+        groups = [groups[name].translate(_EXCLUDE_AMBIGUOUS) for name in parameters['allowed']]
         alphabet = ''.join(groups)
         length = max(parameters['length'], parameters['categories'])
         # 每个候选在可用字符集上均匀采样；拒绝不符合类别数的候选，避免固定位置偏差。
