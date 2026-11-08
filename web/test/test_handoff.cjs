@@ -9,7 +9,7 @@ const process = require('../core/process.js');
 async function main() {
     globalThis.VAULT_WASM_BASE64 = fs.readFileSync(path.join(__dirname, '../core/argon2id.wasm')).toString('base64');
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'integration.json'), 'utf8'));
-    const source = fs.readFileSync(path.join(__dirname, 'desktop_clipboard.vault'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'example.vault'), 'utf8');
     const book = text.decode(source);
     assert.equal(book.entries.length, 4);
     assert(!source.includes(fixture.master));

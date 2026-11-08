@@ -45,7 +45,7 @@ async function main() {
     const html = fs.readFileSync(path.join(root, '..', 'password_viewer.html'), 'utf8');
     const template = fs.readFileSync(path.join(root, 'page.template.html'), 'utf8');
     // Exercise the shipped viewer after the encrypted entries have been copied to another book.
-    const source = fs.readFileSync(path.join(__dirname, 'desktop_clipboard.vault'), 'utf8')
+    const source = fs.readFileSync(path.join(__dirname, '..', 'example.vault'), 'utf8')
         .replace(/^校验码：[0-9a-f]{32}/im, '校验码：' + 'b2'.repeat(16));
     const sharedSource = source.replace(/^(?:内存KiB|迭代次数)：[^\r\n]*\r?\n/gm, '')
         .replace('格式：1', '格式：2\n内存KiB：65536\n迭代次数：3');

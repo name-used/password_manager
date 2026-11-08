@@ -7,3 +7,7 @@ venv/
 .DS_Store
 Thumbs.db
 *.tmp
+
+# Keep private vaults out of Git.
+*.[vV][aA][uU][lL][tT]
+!example.vault

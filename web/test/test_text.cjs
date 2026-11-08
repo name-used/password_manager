@@ -9,7 +9,7 @@ async function main() {
     WebAssembly.instantiate = async () => { ++derivations; throw new Error('Unexpected derivation'); };
     const text = require('../core/text_decoder.js');
     const process = require('../core/process.js');
-    const source = fs.readFileSync(path.join(__dirname, 'legacy.vault'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '..', '..', 'example.vault'), 'utf8');
     const book = text.decode(source);
     assert.equal(book.entries.length, 1);
     assert.equal(book.version, 1);
