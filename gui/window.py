@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import config
-from core import process, text_process
+from core import create_verifier, process, text_process, verify_master, with_verifier
 
 
 def _cost_text(parameters):
@@ -19,20 +19,39 @@ def _cost_text(parameters):
 
 
 def _reencrypt_book(book, old_master, new_master):
+    # 原管理密码已经核验，这里只处理账本副本。
+    verifier = book.get('verifier')
     entries = book['entries']
+    profile = verifier
     for index, entry in enumerate(entries):
         if not entry['data']:
             continue
+        if profile is None:
+            profile = entry
         parameters = dict(book_code=book['book_code'], entry=entry)
         try:
             password = process('decrypt', parameters, old_master)
             entries[index] = process('encrypt', parameters, new_master, password)
         except (ValueError, TypeError) as error:
             raise ValueError(f'第 {index + 1} 条无法更换管理密码。{error}') from None
-    return book, new_master
+    return with_verifier(book, create_verifier(new_master, profile=profile)), new_master
 
 
-def _encrypt_entry(parameters, master, password, previous, generate):
+def _verify_book_password(book_code, entry, verifier, master):
+    if verifier is not None:
+        verify_master(verifier, master)
+    else:
+        process('decrypt', dict(book_code=book_code, entry=entry), master, None)
+    return master
+
+
+def _unlock_book(book_code, entry, verifier, master):
+    _verify_book_password(book_code, entry, verifier, master)
+    if verifier is None:
+        return create_verifier(master, profile=entry)
+
+
+def _encrypt_entry(parameters, master, password, previous, generate, needs_verifier):
     if generate:
         password = process('generate', parameters['entry']['rules'])
     elif previous is not None:
@@ -40,7 +59,8 @@ def _encrypt_entry(parameters, master, password, previous, generate):
         if not password:
             raise ValueError('原来的条目密码为空。请生成或输入新密码后再保存条目。')
     entry = process('encrypt', parameters, master, password)
-    return entry, password
+    verifier = create_verifier(master, profile=entry) if needs_verifier else None
+    return entry, password, verifier
 
 
 class _InputHistory:
@@ -63,6 +83,34 @@ class _InputHistory:
             self.index = index
             return self.values[index]
         return None
+
+
+class _NewMasterDialog(simpledialog.Dialog):
+    def __init__(self, parent, old_master):
+        self.old_master = old_master
+        super().__init__(parent, '更换管理密码')
+
+    def body(self, parent):
+        tk.Label(parent, text='请输入新的管理密码。').pack(anchor='w')
+        self.entry = tk.Entry(parent, show='•', width=36)
+        self.entry.pack(fill='x', pady=(4, 6))
+        visible = tk.BooleanVar(self, False)
+        tk.Checkbutton(parent, text='显示新密码', variable=visible,
+                       command=lambda: self.entry.configure(show='' if visible.get() else '•')).pack(anchor='w')
+        return self.entry
+
+    def validate(self):
+        password = self.entry.get()
+        if not password:
+            messagebox.showerror(self.title(), '管理密码不能为空。', parent=self)
+            return False
+        if password == self.old_master:
+            messagebox.showerror(self.title(), '请输入与旧管理密码不同的新密码。', parent=self)
+            return False
+        return True
+
+    def apply(self):
+        self.result = self.entry.get()
 
 
 def run():
@@ -112,7 +160,7 @@ class Window:
         self.count_label = tk.StringVar(root, '0 个条目')
         self.entry_title = tk.StringVar(root, '新建条目')
         self.crypto_label = tk.StringVar(root, '尚未加密')
-        self.book_label = tk.StringVar(root, self.book['book_code'])
+        self.book_label = tk.StringVar(root)
         self._build()
         self.password.trace_add('write', self._password_changed)
         self.salt.trace_add('write', self._salt_changed)
@@ -360,8 +408,7 @@ class Window:
         self.ciphertext.configure(state='disabled')
         book_row = ttk.Frame(detail)
         book_row.pack(fill='x')
-        ttk.Label(book_row, text='账本编号', style='Muted.TLabel').pack(side='left', padx=(0, 10))
-        ttk.Entry(book_row, textvariable=self.book_label, state='readonly').pack(side='left', fill='x', expand=True)
+        ttk.Label(book_row, textvariable=self.book_label, style='Muted.TLabel').pack(side='left')
 
     def _button(self, parent, text, command, accent=False, **options):
         button = ttk.Button(parent, text=text, command=command, style='Accent.TButton' if accent else 'TButton', **options)
@@ -450,21 +497,6 @@ class Window:
         if not self.busy and not self.unlocked:
             self.compute('unlock')
 
-    def _ask_confirmed_master(self, title):
-        master = simpledialog.askstring(title, '请输入新的管理密码。', show='•', parent=self.root)
-        if master is None:
-            return None
-        if not master:
-            messagebox.showerror(title, '管理密码不能为空。', parent=self.root)
-            return None
-        confirmed = simpledialog.askstring(title, '请再输入一次新管理密码。', show='•', parent=self.root)
-        if confirmed is None:
-            return None
-        if confirmed != master:
-            messagebox.showerror(title, '两次输入的新管理密码不一致。', parent=self.root)
-            return None
-        return master
-
     def _use_book_password(self, master):
         self.clear_secret()
         self.master.set(master)
@@ -474,33 +506,37 @@ class Window:
     def change_book_password(self):
         if self.busy:
             return
-        entries = [entry for entry in self.book['entries'] if entry['data']]
-        title = '更换管理密码'
-        old_master = None
-        if entries:
-            old_master = simpledialog.askstring(title, '请输入原管理密码。更换后，已加密条目都用新的管理密码解密，条目里的密码保持原样。',
-                                                initialvalue=self.master.get(), show='•', parent=self.root)
-            if old_master is None:
-                return
-            if not old_master:
-                messagebox.showerror(title, '旧管理密码不能为空。', parent=self.root)
-                return
-        new_master = self._ask_confirmed_master(title)
+        entry = next((entry for entry in self.book['entries'] if entry['data']), None)
+        verifier = self.book.get('verifier')
+        if verifier is None and entry is None:
+            self._prompt_new_master(None)
+            return
+        old_master = simpledialog.askstring('更换管理密码', '请输入原管理密码。更换后，已加密条目都用新的管理密码解密，条目里的密码保持原样。',
+                                            initialvalue=self.master.get(), show='•', parent=self.root)
+        if old_master is None:
+            return
+        if not old_master:
+            messagebox.showerror('更换管理密码', '旧管理密码不能为空。', parent=self.root)
+            return
+        if self._confirm_entry_cost(verifier if verifier is not None else entry):
+            self._start_job('verify_rotate', _verify_book_password, self.book['book_code'], entry, verifier, old_master)
+
+    def _prompt_new_master(self, old_master):
+        new_master = _NewMasterDialog(self.root, old_master).result
         if new_master is None:
+            self.status.set('已取消更换管理密码。')
             return
-        if new_master == old_master:
-            messagebox.showerror(title, '请输入与旧管理密码不同的新密码。', parent=self.root)
-            return
-        if any(self._expensive_entry(entry) for entry in entries):
-            if not messagebox.askyesno('解密可能需要更长时间', '有些条目解密需要较多内存，整本更换管理密码可能需要更长时间。继续吗？', parent=self.root):
+        entries = [entry for entry in self.book['entries'] if entry['data']]
+        verifier = self.book.get('verifier')
+        if any(self._expensive_entry(entry) for entry in entries + ([verifier] if verifier is not None else [])):
+            message = '整本更换管理密码可能需要更长时间或占用较多内存。'
+            if verifier is None and entries and entries[0]['memory_kib'] >= 128 * 1024:
+                message += '\n新校验样本会沿用第一条密文的参数，整个账本将需要用桌面端验证。'
+            if not messagebox.askyesno('更换管理密码', message + '\n继续吗？', parent=self.root):
+                self.status.set('已取消更换管理密码。')
                 return
         if self._pending_encryption() and not self._confirm_discard_secret():
-            return
-        if not entries:
-            self._use_book_password(new_master)
-            self.salt.set('')
-            self._show_encryption_settings(self._current_entry())
-            self.status.set('已设置管理密码。接下来保存的条目会用它加密。')
+            self.status.set('已取消更换管理密码。')
             return
         self._start_job('rotate', _reencrypt_book, deepcopy(self.book), old_master, new_master)
 
@@ -724,7 +760,7 @@ class Window:
         except (ValueError, TypeError) as error:
             messagebox.showerror('无法保存条目', str(error), parent=self.root)
             return
-        self._start_job('encrypt', _encrypt_entry, parameters, master, password, previous, generate)
+        self._start_job('encrypt', _encrypt_entry, parameters, master, password, previous, generate, 'verifier' not in self.book)
 
     def _expensive_entry(self, entry):
         return entry['memory_kib'] > config.MEMORY_KIB or entry['iterations'] > config.ITERATIONS or entry['lanes'] > config.LANES
@@ -737,15 +773,20 @@ class Window:
             details.append(f'保存新设置需要 {_cost_text(entry)}。')
         if entry['memory_kib'] >= 128 * 1024:
             details.append('这条记录将超过离线网页查看器的内存上限，需要用桌面端解密。')
+            if 'verifier' not in self.book:
+                details.append('本次保存还会用同样的参数创建校验样本，整个账本将需要用桌面端验证。')
         if not details:
             return True
         return messagebox.askyesno('确认加密设置', '\n'.join(details + ['继续保存条目吗？']), parent=self.root)
 
-    def _confirm_entry_cost(self, entry):
+    def _confirm_entry_cost(self, entry, *, creates_verifier=False):
         if not self._expensive_entry(entry):
             return True
         cost = f"内存 {_cost_text(entry)} · {entry['lanes']} 通道。"
-        message = f'解密这条记录可能需要较长时间或占用较多内存。\n{cost}\n继续解密吗？'
+        message = f'这次密码计算可能需要较长时间或占用较多内存。\n{cost}'
+        if creates_verifier and entry['memory_kib'] >= 128 * 1024:
+            message += '\n保存用这些参数创建的校验样本后，整个账本将需要用桌面端验证。'
+        message += '\n继续吗？'
         return messagebox.askyesno('解密可能需要更长时间', message, parent=self.root)
 
     def compute(self, action):
@@ -761,18 +802,22 @@ class Window:
             if action == 'unlock':
                 if self.unlocked:
                     return
-                # 优先用所选密文核对会话密码，只验证一条。
-                entries = self.book['entries']
-                entry = entries[self.index] if self.index is not None else None
-                if entry is None or not entry['data']:
-                    entry = next((item for item in entries if item['data']), None)
-                if entry is None:
+                verifier = self.book.get('verifier')
+                # 旧账本尚无样本时，用一条已有密文验证输入。
+                entry = None
+                if verifier is None:
+                    entries = self.book['entries']
+                    entry = entries[self.index] if self.index is not None else None
+                    if entry is None or not entry['data']:
+                        entry = next((item for item in entries if item['data']), None)
+                if entry is None and verifier is None:
                     self.unlocked = True
                     self._session_controls()
                     self.status.set('账本已解锁。接下来保存的条目会用这个管理密码加密。')
                     return
-                entry = deepcopy(entry)
-                password = None
+                if self._confirm_entry_cost(verifier if verifier is not None else entry, creates_verifier=verifier is None):
+                    self._start_job('unlock', _unlock_book, self.book['book_code'], deepcopy(entry), deepcopy(verifier), master)
+                return
             elif not self.unlocked:
                 raise ValueError('请先点击顶部的“解锁账本”。')
             else:
@@ -791,7 +836,7 @@ class Window:
             title = '无法解锁账本' if action == 'unlock' else '无法解密密码'
             messagebox.showerror(title, str(error), parent=self.root)
             return
-        self._start_job(action, process, 'decrypt' if action == 'unlock' else action, parameters, master, password)
+        self._start_job(action, process, action, parameters, master, password)
 
     def _start_job(self, action, work, *args):
         self.busy = True
@@ -820,7 +865,8 @@ class Window:
     def _poll(self):
         if not self.future.done():
             elapsed = monotonic() - self.job_started
-            verb = {'unlock': '解锁账本', 'encrypt': '保存条目', 'decrypt': '解密密码', 'rotate': '更换管理密码'}[self.job_action]
+            verb = {'unlock': '解锁账本', 'encrypt': '保存条目', 'decrypt': '解密密码',
+                    'verify_rotate': '验证原管理密码', 'rotate': '更换管理密码'}[self.job_action]
             self.status.set(f'正在{verb} · 已用 {elapsed:.1f} 秒。')
             self.root.after(100, self._poll)
             return
@@ -837,17 +883,26 @@ class Window:
         try:
             result = future.result()
         except Exception as error:
-            title = {'unlock': '无法解锁账本', 'encrypt': '无法保存条目', 'decrypt': '无法解密密码', 'rotate': '无法更换管理密码'}[self.job_action]
+            title = {'unlock': '无法解锁账本', 'encrypt': '无法保存条目', 'decrypt': '无法解密密码',
+                     'verify_rotate': '原管理密码验证失败', 'rotate': '无法更换管理密码'}[self.job_action]
             self.status.set(f'{title}。')
             detail = str(error)
-            if self.job_action == 'decrypt':
-                detail += '\n如果这条使用其他管理密码，请先锁定账本，再用对应密码解锁。'
+            if self.job_action == 'decrypt' and isinstance(error, ValueError):
+                detail = f'条目校验失败。{detail}\n如果这条来自使用其他管理密码的账本，请在来源账本查看。'
             messagebox.showerror(title, detail, parent=self.root)
             return
         if self.job_action == 'unlock':
+            if result is not None:
+                self.book = with_verifier(self.book, result)
+                self.dirty = True
+                self._file_status()
             self.unlocked = True
             self._session_controls()
-            self.status.set('账本已解锁。可以解密条目或保存新密码。')
+            self.status.set('已核对旧账本。保存后将使用一个管理密码打开账本。' if result is not None else
+                            '账本已解锁。可以解密条目或保存新密码。')
+        elif self.job_action == 'verify_rotate':
+            self.status.set('原管理密码已验证。')
+            self._prompt_new_master(result)
         elif self.job_action == 'rotate':
             self.book, master = result
             self._use_book_password(master)
@@ -856,11 +911,16 @@ class Window:
                 entry = self._current_entry()
                 self._show_ciphertext(entry)
                 self._show_encryption_settings(entry)
+            else:
+                self.salt.set('')
+                self._show_encryption_settings(self._current_entry())
             self._file_status()
             self.status.set('管理密码已更换。点击“保存账本”写入文件。')
         elif self.job_action == 'encrypt':
-            entry, password = result
+            entry, password, verifier = result
             self.book, self.index = self._book_with_entry(entry, self.job_index)
+            if verifier is not None:
+                self.book = with_verifier(self.book, verifier)
             self.dirty = True
             self._show_entry(self.index, reset_history=False)
             self._set_password(password, saved=True)
@@ -886,6 +946,7 @@ class Window:
         if self.path is not None and self.dirty:
             name = f'{name}（未保存）'
         self.file_label.set(name)
+        self.book_label.set('已设置账本校验样本' if 'verifier' in self.book else '尚未设置账本校验样本')
         self.root.title(f'{name} — {config.TITLE}')
 
     def show_book_text(self):
@@ -1003,6 +1064,11 @@ class Window:
             settings = saved_settings.get(entry['data'])
             if settings and tuple(entry[key] for key in fields) not in settings:
                 raise ValueError('现有密文的加密设置被改动了。请恢复原值。要更换设置，请在条目界面重新保存条目。')
+        verifier = self.book.get('verifier')
+        if verifier is not None and verifier != book.get('verifier'):
+            retains_ciphertext = any(entry['data'] in saved_settings for entry in book['entries'])
+            if retains_ciphertext or not saved_settings:
+                raise ValueError('校验样本已被改动。请恢复原样本。要更换管理密码，请使用管理端的“更换管理密码”。')
 
     def show_append_text(self):
         if self.busy or self.book_text is None:
@@ -1059,7 +1125,7 @@ class Window:
             return False
         entries = self.book['entries']
         current_text = self.book_text_snapshot if entries is prior_entries else text_process('encode', parameters=self.book)
-        if not any(entry['data'] for entry in entries) and any(entry['data'] for entry in addition):
+        if 'verifier' not in self.book and not any(entry['data'] for entry in entries) and any(entry['data'] for entry in addition):
             self.lock_book()
         self.book['entries'] = entries + addition
         self.dirty = True
@@ -1092,7 +1158,7 @@ class Window:
 
     def _leave_book(self):
         changed = self._snapshot() != self.form_snapshot
-        if not changed and (not self.dirty or (self.path is None and not self.book['entries'])):
+        if not changed and (not self.dirty or (self.path is None and not self.book['entries'] and 'verifier' not in self.book)):
             return not self._pending_encryption() or self._confirm_discard_secret()
         message = '要先把修改保存到账本文件吗？\n选“否”将放弃未保存的修改。'
         if self._pending_encryption():
@@ -1105,7 +1171,6 @@ class Window:
         self.book = book
         self.path = path
         self.dirty = dirty
-        self.book_label.set(book['book_code'])
         self._show_entry(0 if book['entries'] else None)
         self.search.set('')
         self._file_status()

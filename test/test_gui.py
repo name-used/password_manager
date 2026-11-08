@@ -7,14 +7,14 @@ from time import monotonic, sleep
 from unittest.mock import patch
 import unittest
 
-from core import process, text_process
+from core import process, text_process, verify_master
 
 try:
     import tkinter as tk
 except ImportError:
     tk = None
 if tk is not None:
-    from gui.window import Window
+    from gui.window import Window, _NewMasterDialog
 
 
 @unittest.skipIf(tk is None, '当前 Python 未提供 Tkinter')
@@ -129,18 +129,31 @@ class GuiTests(unittest.TestCase):
         window.book['entries'].extend([second, draft])
         original = deepcopy(window.book)
         window.fields['nickname'].set('尚未应用的资料')
-        with patch('gui.window.simpledialog.askstring', side_effect=[old_master, new_master, 'typo']):
+        with patch('gui.window.simpledialog.askstring', return_value='wrong old master') as old_prompt, \
+                patch('gui.window._NewMasterDialog') as new_prompt:
             window.change_book_password()
+            self._wait()
+        old_prompt.assert_called_once()
+        new_prompt.assert_not_called()
         self.assertEqual(window.master.get(), old_master)
         self.assertEqual(window.book, original)
         self.error_message.assert_called_once()
+        self.assertEqual(self.error_message.call_args.args[0], '原管理密码验证失败')
         self.error_message.reset_mock()
-        with patch('gui.window.simpledialog.askstring', side_effect=[old_master, new_master, new_master]):
+        with patch('gui.window.simpledialog.askstring', return_value=old_master) as old_prompt, \
+                patch('gui.window._NewMasterDialog') as new_prompt:
+            new_prompt.return_value.result = new_master
             window.change_book_password()
             self._wait()
+        old_prompt.assert_called_once()
+        new_prompt.assert_called_once_with(self.root, old_master)
         self.error_message.assert_not_called()
         self.assertTrue(window.dirty and window.unlocked)
         self.assertEqual(window.master.get(), new_master)
+        self.assertTrue(verify_master(window.book['verifier'], new_master))
+        self.assertNotEqual(window.book['verifier']['salt'], original['verifier']['salt'])
+        with self.assertRaises(ValueError):
+            verify_master(window.book['verifier'], old_master)
         self.assertEqual(window.fields['nickname'].get(), '尚未应用的资料')
         self.assertEqual(window.book['entries'][2], draft)
         for index, expected in enumerate(('Synthetic-site-pass1!', '保留原密码')):
@@ -168,13 +181,99 @@ class GuiTests(unittest.TestCase):
         window.book['entries'].append(foreign)
         window.dirty = False
         original = deepcopy(window.book)
-        with patch('gui.window.simpledialog.askstring', side_effect=['Synthetic-master-1!', 'new master', 'new master']):
+        with patch('gui.window.simpledialog.askstring', return_value='Synthetic-master-1!'), \
+                patch('gui.window._NewMasterDialog') as new_prompt:
+            new_prompt.return_value.result = 'new master'
             window.change_book_password()
             self._wait()
+        new_prompt.assert_called_once_with(self.root, 'Synthetic-master-1!')
         self.assertEqual(window.book, original)
         self.assertFalse(window.dirty)
         self.assertEqual(window.master.get(), 'Synthetic-master-1!')
         self.assertIn('第 2 条', self.error_message.call_args.args[1])
+
+    def test_legacy_change_password_checks_first_encrypted_entry_before_prompt(self):
+        window = self.window
+        code = window.book['book_code']
+        draft = window._blank_entry()
+        first = process('encrypt', dict(book_code=code, entry=draft), 'first synthetic master', 'first synthetic site password')
+        selected = process('encrypt', dict(book_code=code, entry=draft), 'selected synthetic master', 'selected synthetic site password')
+        book = dict(version=1, book_code=code, entries=[draft, first, selected])
+        window._set_book(book)
+        window._show_entry(2)
+
+        with patch('gui.window.simpledialog.askstring', return_value='selected synthetic master'), \
+                patch('gui.window._NewMasterDialog') as new_prompt:
+            window.change_book_password()
+            self._wait()
+        new_prompt.assert_not_called()
+        self.error_message.assert_called_once()
+        self.assertEqual(self.error_message.call_args.args[0], '原管理密码验证失败')
+        self.assertEqual(window.book, book)
+        self.assertFalse(window.unlocked)
+
+    def test_cancel_new_master_after_verification_preserves_current_state(self):
+        self._encrypt()
+        window = self.window
+        old_master = window.master.get()
+        original = deepcopy(window.book)
+        window.dirty = False
+        window.password.set('unsaved synthetic site password')
+        window.salt.set('ab' * 16)
+        with patch('gui.window.simpledialog.askstring', return_value=old_master), \
+                patch('gui.window.verify_master', wraps=verify_master) as authenticate, \
+                patch('gui.window._NewMasterDialog') as new_prompt, \
+                patch('gui.window._reencrypt_book') as rotate:
+            def cancel_new_prompt(_parent, _old_master):
+                authenticate.assert_called_once_with(original['verifier'], old_master)
+                return new_prompt.return_value
+
+            new_prompt.side_effect = cancel_new_prompt
+            new_prompt.return_value.result = None
+            window.change_book_password()
+            self._wait()
+        new_prompt.assert_called_once_with(self.root, old_master)
+        rotate.assert_not_called()
+        self.error_message.assert_not_called()
+        self.assertEqual(window.book, original)
+        self.assertEqual(window.master.get(), old_master)
+        self.assertEqual(window.password.get(), 'unsaved synthetic site password')
+        self.assertEqual(window.salt.get(), 'ab' * 16)
+        self.assertTrue(window.unlocked)
+        self.assertFalse(window.dirty)
+
+    def test_new_master_dialog_has_one_masked_input_and_reveals_without_editing(self):
+        password = ' synthetic new master 🙂 '
+        observations = {}
+
+        def exercise_dialog():
+            dialog = next(child for child in self.root.winfo_children() if isinstance(child, _NewMasterDialog))
+            try:
+                widgets = dialog.entry.master.winfo_children()
+                observations['inputs'] = sum(isinstance(widget, tk.Entry) for widget in widgets)
+                toggle = next(widget for widget in widgets if isinstance(widget, tk.Checkbutton))
+                observations['masked'] = dialog.entry.cget('show')
+                dialog.entry.insert(0, password)
+                toggle.invoke()
+                observations['revealed'] = dialog.entry.cget('show')
+                observations['visible_value'] = dialog.entry.get()
+                toggle.invoke()
+                observations['hidden_again'] = dialog.entry.cget('show')
+                observations['hidden_value'] = dialog.entry.get()
+            except Exception as error:
+                observations['error'] = error
+            finally:
+                if 'error' in observations:
+                    dialog.cancel()
+                else:
+                    dialog.ok()
+
+        self.root.after(50, exercise_dialog)
+        dialog = _NewMasterDialog(self.root, 'synthetic old master')
+        self.assertNotIn('error', observations)
+        self.assertEqual(observations, dict(inputs=1, masked='•', revealed='', visible_value=password,
+                                            hidden_again='•', hidden_value=password))
+        self.assertEqual(dialog.result, password)
 
     def test_async_encrypt_decrypt_and_wrong_master(self):
         self._encrypt()
@@ -503,9 +602,10 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(window.master.get(), 'Synthetic-master-1!')
         self.error_message.assert_not_called()
 
-    def test_unlock_checks_selected_imported_entry_without_displaying_it(self):
+    def test_legacy_unlock_checks_selected_entry_before_creating_verifier(self):
         self._encrypt()
         window = self.window
+        window._set_book(dict(version=1, book_code='bc' * 16, entries=window.book['entries']))
         master = 'another synthetic master'
         source_code = 'ab' * 16
         entry = process('encrypt', dict(book_code=source_code, entry=window._blank_entry()), master, 'imported secret')
@@ -516,6 +616,13 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.book['entries'][1], entry)
         self.assertEqual(window.index, 1)
         window.lock_book()
+        window.master.set('wrong password')
+        window.unlock_book()
+        self._wait()
+        self.assertFalse(window.unlocked)
+        self.assertNotIn('verifier', window.book)
+        self.error_message.assert_called_once()
+        self.error_message.reset_mock()
         window.master.set(master)
         with patch('gui.window.process', wraps=process) as compute:
             window.unlock_book()
@@ -524,12 +631,79 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(compute.call_args.args[0], 'decrypt')
         self.assertEqual(compute.call_args.args[1]['entry'], entry)
         self.assertTrue(window.unlocked)
+        self.assertEqual(window.book['version'], 3)
+        self.assertEqual(window.book['entries'][1], entry)
+        self.assertTrue(verify_master(window.book['verifier'], master))
         self.assertEqual(window.password.get(), '')
         self.assertEqual(window.index, 1)
         window.compute('decrypt')
         self._wait()
         self.assertEqual(window.password.get(), 'imported secret')
         self.error_message.assert_not_called()
+
+    def test_new_format_uses_header_with_a_foreign_or_damaged_selected_entry(self):
+        self._encrypt()
+        window = self.window
+        entry = process('encrypt', dict(book_code='ab' * 16, entry=window._blank_entry()), 'foreign master', 'foreign password')
+        window.book['entries'].append(entry)
+        window._show_entry(1)
+        window.lock_book()
+        window.master.set('foreign master')
+        window.unlock_book()
+        self._wait()
+        self.assertFalse(window.unlocked)
+        self.assertEqual(window.password.get(), '')
+        window.master.set('Synthetic-master-1!')
+        with patch('gui.window.process', side_effect=AssertionError('解锁新版账本不应解密条目')):
+            window.unlock_book()
+            self._wait()
+        self.assertTrue(window.unlocked)
+        self.assertEqual(window.password.get(), '')
+        window.compute('decrypt')
+        self._wait()
+        self.assertIn('条目校验失败', self.error_message.call_args.args[1])
+        self.assertTrue(window.unlocked)
+        window.lock_book()
+        sample = window.book['verifier']
+        first = 'A' if sample['data'][0] != 'A' else 'B'
+        sample['data'] = first + sample['data'][1:]
+        window.master.set('Synthetic-master-1!')
+        with patch('gui.window.process', side_effect=AssertionError('校验样本失败也不能回退到条目')):
+            window.unlock_book()
+            self._wait()
+        self.assertFalse(window.unlocked)
+        self.assertIn('校验样本', self.error_message.call_args.args[1])
+
+    def test_empty_book_can_set_and_persist_an_independent_verifier(self):
+        window = self.window
+        master = 'explicit synthetic master'
+        with patch('gui.window.simpledialog.askstring') as old_prompt, patch('gui.window._NewMasterDialog') as new_prompt:
+            new_prompt.return_value.result = master
+            window.change_book_password()
+            self._wait()
+        old_prompt.assert_not_called()
+        new_prompt.assert_called_once_with(self.root, None)
+        self.assertTrue(window.unlocked)
+        self.assertTrue(window.dirty)
+        self.assertEqual(window.book['entries'], [])
+        self.assertTrue(verify_master(window.book['verifier'], master))
+        with patch('gui.window.messagebox.askyesnocancel', return_value=None) as leave:
+            window.new_book()
+        leave.assert_called_once()
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            window.path = Path(directory) / 'empty.vault'
+            self.assertTrue(window.save())
+            book = text_process('decode', window.path.read_text(encoding='utf-8'))
+            self.assertEqual(book, window.book)
+        window.lock_book()
+        window.master.set('wrong password')
+        window.unlock_book()
+        self._wait()
+        self.assertFalse(window.unlocked)
+        window.master.set(master)
+        window.unlock_book()
+        self._wait()
+        self.assertTrue(window.unlocked)
 
     def test_empty_book_unlock_does_not_compute_and_lock_clears_session(self):
         window = self.window
@@ -585,7 +759,7 @@ class GuiTests(unittest.TestCase):
         window = self.window
         window.show_book_text()
         original_text = window.book_text.get('1.0', 'end-1c')
-        source = {**window.book, 'book_code': 'ab' * 16, 'entries': [dict(window._blank_entry(), service='粘贴来的条目')]}
+        source = dict(version=1, book_code='ab' * 16, entries=[dict(window._blank_entry(), service='粘贴来的条目')])
         text = text_process('encode', parameters=source)
 
         def widgets(widget):
@@ -620,6 +794,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(len(window.book['entries']), 2)
         self.assertEqual(window.book['entries'][1], source['entries'][0])
         self.assertEqual(window.book['book_code'], text_process('decode', original_text)['book_code'])
+        self.assertEqual(window.book['verifier'], text_process('decode', original_text)['verifier'])
         self.assertEqual(window.book_text.get('1.0', 'end-1c').count('[条目]'), 2)
         button(parent, '粘贴并追加…').invoke()
         child = parent.grab_current()

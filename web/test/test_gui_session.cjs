@@ -78,14 +78,23 @@ async function main() {
     vm.runInContext(script, context, {filename: 'password_viewer.html'});
     const process = context.VaultProcess;
     const calls = [];
-    context.VaultProcess = {async decrypt(...args) {
-        calls.push({bookCode: args[0], service: args[1].service, master: args[2]});
-        return process.decrypt(...args);
-    }};
+    context.VaultProcess = {
+        async verify(...args) {
+            calls.push('verify');
+            return process.verify(...args);
+        },
+        async decrypt(...args) {
+            calls.push('decrypt');
+            return process.decrypt(...args);
+        },
+    };
     const ui = elements;
-    const defaultCryptoInfo = '加密算法 XCHACHA20-POLY1305 · 内存 64 MiB · 迭代 3 轮 · 并行通道 4';
+    assert(!ids.includes('lock'));
+    assert(template.indexOf('id="plaintext"') < template.indexOf('id="metadata"'), 'Password comes before public details');
+    const verifierHeader = fs.readFileSync(path.join(__dirname, 'verifier.vault'), 'utf8');
+    const verifiedSource = verifierHeader + '\n' + source.slice(source.indexOf('[条目]'));
     const typeMaster = async value => {
-        assert(!ui.master.disabled && !ui.master.readOnly);
+        assert(!ui.master.disabled && !ui['master-form'].hidden);
         ui.master.value = value;
         await ui.master.emit('input');
     };
@@ -98,26 +107,33 @@ async function main() {
         assert.equal(ui.plaintext.value, '');
         assert(!ui['show-password'].checked && ui['show-password'].disabled && ui['copy-password'].disabled);
     };
+    const assertEntryCosts = () => {
+        assert.equal(ui['crypto-info'].textContent, '加密算法 XCHACHA20-POLY1305 · 内存 64 MiB · 迭代 3 轮 · 并行通道 4');
+    };
 
-    assert(ui.master.disabled && ui['save-book'].disabled);
+    assert(ui.master.disabled && ui.verify.disabled && ui['save-book'].disabled);
     assertPasswordCleared();
-    ui.source.value = source;
+    ui.source.value = verifiedSource;
     await ui.load.click();
     assert(!ui.master.disabled && !ui['save-book'].disabled);
-    assert.equal(calls.length, 0, 'Load must not derive keys');
     await ui.entries.children[0].click();
-    assert.equal(ui['crypto-info'].textContent, defaultCryptoInfo);
-    assert.equal(calls.length, 0, 'Selection must not derive keys');
+    assert.deepEqual(calls, [], 'Reading and selecting before validation must not derive any keys');
+    assert(!ui['public-details'].open);
+    assertEntryCosts();
+
     await typeMaster('synthetic-wrong-password');
-    await ui.decrypt.click();
-    assert.equal(calls.length, 1);
+    await ui.verify.click();
+    assert.deepEqual(calls, ['verify']);
+    assert(!ui['master-form'].hidden && !ui.master.disabled);
     assertPasswordCleared();
-    assert(!ui.master.readOnly, 'Failed first attempt must allow correction');
+    assert.match(ui.status.textContent, /管理密码验证失败/);
+
     await typeMaster(fixture.master);
-    const pending = ui.decrypt.click();
-    assert(ui.master.disabled && ui.source.disabled && ui.lock.disabled && ui['save-book'].disabled);
+    const pending = ui.verify.click();
+    assert(ui.master.disabled && ui.source.disabled && ui.verify.disabled && ui['save-book'].disabled);
     await pending;
-    assert.equal(calls.length, 2);
+    assert.deepEqual(calls, ['verify', 'verify', 'decrypt'], 'Verify once, then decrypt the selected entry only');
+    assert(ui['master-panel'].hidden && ui['master-form'].hidden && ui['change-master'].hidden);
     assert.equal(ui.plaintext.value, '••••••••');
     await ui['copy-password'].click();
     assert.equal(ui.plaintext.value, '••••••••', 'Clipboard failure must not reveal a masked password');
@@ -127,22 +143,12 @@ async function main() {
     assert.equal(ui.plaintext.value, fixture.passwords[0]);
     await showPassword(false);
     assert.equal(ui.plaintext.value, '••••••••');
-    await showPassword(true);
-    assert(ui.master.readOnly);
-    assert(!ui.master.disabled);
-    await ui['save-book'].click();
-    assert.equal(downloads.length, 1);
-    assert.equal(downloads[0].name, '账本.txt');
-    assert.equal(downloads[0].blob.type, 'text/plain;charset=utf-8');
-    assert.deepEqual(Buffer.from(await downloads[0].blob.arrayBuffer()), Buffer.from(source, 'utf8'));
+
+    ui['public-details'].open = true;
     await ui.entries.children[1].click();
-    assert.equal(calls.length, 2);
-    assert.equal(ui.master.value, fixture.master);
-    assertPasswordCleared();
-    assert(ui.master.readOnly);
-    await ui.decrypt.click();
-    assert.equal(calls.length, 3);
-    assert.equal(ui.plaintext.value, '••••••••');
+    assert.equal(calls.at(-1), 'decrypt');
+    assert.equal(calls.length, 4);
+    assert(!ui['public-details'].open && !ui['show-password'].checked);
     const clipboard = [];
     context.navigator.clipboard = {async writeText(value) { clipboard.push(value); }};
     await ui['copy-password'].click();
@@ -150,65 +156,61 @@ async function main() {
     assert.equal(ui.plaintext.value, '••••••••');
     delete context.navigator.clipboard;
     await showPassword(true);
-    assert.equal(ui.plaintext.value, fixture.passwords[1]);
     await ui['copy-password'].click();
     assert.deepEqual(ui.plaintext.selection, [0, fixture.passwords[1].length]);
-    assert.equal(calls[2].master, calls[1].master);
 
-    // A broken or previously mixed record cannot silently select a different book password.
-    vm.runInContext("viewer.book.entries[1].data = viewer.book.entries[1].data.replace(/^./, value => value === 'A' ? 'B' : 'A')", context);
-    await ui.decrypt.click();
-    assert.equal(calls.length, 4);
-    assertPasswordCleared();
-    assert.equal(ui.master.value, fixture.master);
-    assert(ui.master.readOnly, 'An established session must remain fixed after another entry fails');
-    await ui.lock.click();
-    assert.equal(ui.master.value, '');
-    assertPasswordCleared();
-    assert(!ui.master.readOnly);
-
-    ui.source.value = source;
-    await ui.load.click();
+    const originalData = vm.runInContext('viewer.book.entries[2].data', context);
+    vm.runInContext("viewer.book.entries[2].data = viewer.book.entries[2].data.replace(/^./, value => value === 'A' ? 'B' : 'A')", context);
     await ui.entries.children[2].click();
-    await typeMaster(fixture.master);
-    await ui.decrypt.click();
-    assert.equal(ui.plaintext.value, '••••••••');
+    assert(ui['master-form'].hidden);
+    assertPasswordCleared();
+    assert.match(ui.status.textContent, /^条目校验失败/);
+    assert(!ui.retry.hidden && !ui.retry.disabled);
+    vm.runInContext('viewer.book.entries[2].data = ' + JSON.stringify(originalData), context);
+    await ui.retry.click();
+    assert(ui.retry.hidden);
     await showPassword(true);
     assert.equal(ui.plaintext.value, fixture.passwords[2]);
-    const beforeEdit = calls.length;
-    ui.source.value = source + '\n';
+
+    await ui['save-book'].click();
+    assert.equal(downloads[0].name, '账本.txt');
+    assert.equal(downloads[0].blob.type, 'text/plain;charset=utf-8');
+    assert.deepEqual(Buffer.from(await downloads[0].blob.arrayBuffer()), Buffer.from(verifiedSource, 'utf8'));
+
+    ui.source.value = source;
     await ui.source.emit('input');
-    assert.equal(calls.length, beforeEdit);
     assert.equal(ui.master.value, '');
-    assert(!ui.master.readOnly);
-    assert(ui.master.disabled && ui.decrypt.disabled && ui['save-book'].disabled);
+    assert(!ui['master-form'].hidden && ui.master.disabled && ui['save-book'].disabled);
     assertPasswordCleared();
     await ui.load.click();
-    await ui.entries.children[3].click();
+    const beforeLegacy = calls.length;
     await typeMaster(fixture.master);
-    await ui.decrypt.click();
+    await ui.verify.click();
+    assert.deepEqual(calls.slice(beforeLegacy), ['decrypt']);
+    assert(!ui['master-panel'].hidden && ui['master-form'].hidden && !ui['change-master'].hidden);
+    assertPasswordCleared();
+    await ui.entries.children[3].click();
     assert.equal(ui.plaintext.value, '');
     assert.equal(ui['plaintext-state'].textContent, '已解密（密码为空）');
-    assert(ui['show-password'].disabled && !ui['copy-password'].disabled);
-    assert(ui.master.readOnly);
-
-    // Applying any book, including the same text, clears the previous book session.
-    await ui.load.click();
+    assert(!ui['copy-password'].disabled);
+    await ui['change-master'].click();
     assert.equal(ui.master.value, '');
-    assert(!ui.master.readOnly);
+    assert(!ui['master-form'].hidden);
     assertPasswordCleared();
-    assert.equal(calls.length, beforeEdit + 1);
-    await ui.entries.children[0].click();
+
+    await ui.entries.children[1].click();
     await typeMaster(fixture.master);
-    await ui.decrypt.click();
+    const selectedLegacy = calls.length;
+    await ui.verify.click();
+    assert.deepEqual(calls.slice(selectedLegacy), ['decrypt'], 'Reuse authenticated plaintext for selected legacy entry');
+    await showPassword(true);
+    assert.equal(ui.plaintext.value, fixture.passwords[1]);
+
     ui.source.value = '[invalid]';
     await ui.load.click();
     assert.match(ui.status.textContent, /^无法读取粘贴内容。/);
-    assert.equal(ui.master.value, '');
-    assert(!ui.master.readOnly);
+    assert(!ui['master-form'].hidden && ui.master.disabled && ui['save-book'].disabled);
     assertPasswordCleared();
-    assert(ui.decrypt.disabled && ui['save-book'].disabled);
-
     ui.file.files = [new Blob(['[invalid]'])];
     await ui.file.emit('change');
     assert.match(ui.status.textContent, /^无法读取账本文件内容。/);
@@ -220,30 +222,29 @@ async function main() {
     ui.file.files = [file];
     await ui.file.emit('change');
     assert.equal(ui.master.value, '');
-    assert(!ui.master.readOnly && !ui.master.disabled);
     await ui['save-book'].click();
-    assert.equal(downloads.length, 2);
     assert.deepEqual(await downloads[1].blob.arrayBuffer(), await file.arrayBuffer(), 'Keep imported BOM and CRLF bytes');
     await ui.entries.children[0].click();
-    assert.equal(ui['crypto-info'].textContent, defaultCryptoInfo);
+    assertEntryCosts();
     await typeMaster(fixture.master);
-    await ui.decrypt.click();
+    await ui.verify.click();
     await showPassword(true);
     assert.equal(ui.plaintext.value, fixture.passwords[0]);
     await ui['clear-book'].click();
     assert.equal(ui.master.value, '');
+    assert(!ui['master-form'].hidden && ui.master.disabled && ui['save-book'].disabled);
     assertPasswordCleared();
-    assert(!ui.master.readOnly && ui.master.disabled && ui['save-book'].disabled);
-    ui.source.value = sharedSource;
+
+    // An independent verifier also works in an empty book without decrypting an entry.
+    ui.source.value = verifierHeader;
     await ui.load.click();
-    await ui.entries.children[0].click();
-    assert.equal(ui['crypto-info'].textContent, defaultCryptoInfo);
-    ui.source.value = source;
-    await ui.load.click();
-    await ui.entries.children[0].click();
-    assert.equal(ui['crypto-info'].textContent, defaultCryptoInfo);
-    assert.equal(calls.length, 8, 'Only eight explicit single-entry decrypt actions should have run');
-    console.log('Shipped HTML session tests passed: format 1/2 display, password concealment and copy, file import and export; eight explicit full-parameter decrypts.');
+    await typeMaster(fixture.master);
+    const beforeEmpty = calls.length;
+    await ui.verify.click();
+    assert.deepEqual(calls.slice(beforeEmpty), ['verify']);
+    assert(ui['master-form'].hidden);
+    assertPasswordCleared();
+    console.log('Shipped HTML session tests passed: verifier and legacy flows, automatic selected-entry decryption, masking, and byte-preserving downloads.');
 }
 
 main().catch(error => {console.error(error); process.exitCode = 1;});

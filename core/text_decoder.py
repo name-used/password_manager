@@ -12,6 +12,9 @@ import re
 ALGORITHMS = ('AES-256-GCM', 'CHACHA20-POLY1305', 'XCHACHA20-POLY1305')
 KDF_FIELDS = {'内存KiB': 'memory_kib', '迭代次数': 'iterations'}
 HEADER_LABELS = {'格式', '校验码'}
+VERIFIER_LABEL = '校验样本'
+VERIFIER_KEYS = ('algorithm', 'memory_kib', 'iterations', 'lanes', 'salt', 'data')
+VERIFIER_BOOK_CODE = '0' * 32
 ENTRY_FIELDS = {
     '服务名': 'service', '应用地址': 'addresses', '服务编码': 'code', '用户名': 'username', '昵称': 'nickname',
     '加密算法': 'algorithm', **KDF_FIELDS, '并行通道': 'lanes', '随机码': 'salt', '密码密文': 'data',
@@ -43,7 +46,7 @@ def decode(text, *, line_offset=0, fragment=False):
         if '：' not in line:
             raise ValueError(f'第 {line_number} 行缺少中文冒号“：”。请用它分隔字段名和值。')
         label, value = line.split('：', 1)
-        labels = HEADER_LABELS | KDF_FIELDS.keys() if section == '[账本]' else ENTRY_LABELS | OPTIONAL_LABELS
+        labels = HEADER_LABELS | KDF_FIELDS.keys() | {VERIFIER_LABEL} if section == '[账本]' else ENTRY_LABELS | OPTIONAL_LABELS
         if label not in labels:
             raise ValueError(f'第 {line_number} 行的“{label}”不是 {section} 中支持的字段。')
         if label in current:
@@ -61,22 +64,28 @@ def decode(text, *, line_offset=0, fragment=False):
         raise ValueError(f'第 {sections[0][3]} 行前缺少 [账本]。')
 
     section, header, header_lines, line_number = sections[0]
-    _require_fields(section, header, HEADER_LABELS, line_number)
-    if header['格式'] not in ('1', '2'):
-        raise ValueError(f'{_field("格式", header_lines)}不受支持。当前仅支持格式 1 和 2。')
+    _require_fields(section, header, {'格式'}, line_number)
+    if header['格式'] not in ('1', '2', '3'):
+        raise ValueError(f'{_field("格式", header_lines)}不受支持。当前仅支持格式 1、2 和 3。')
     version = int(header['格式'])
-    validate_code(header['校验码'], field_lines=header_lines)
-    book = {'version': version, 'book_code': header['校验码'], 'entries': []}
+    expected_header = {'格式', VERIFIER_LABEL} if version == 3 else HEADER_LABELS
+    if version == 2:
+        expected_header = expected_header | KDF_FIELDS.keys()
+    _require_fields(section, header, expected_header, line_number)
+    for label in header:
+        if label not in expected_header:
+            raise ValueError(f'{_field(label, header_lines)}不能写在格式 {version} 的 [账本] 中。')
+    book = {'version': version, 'book_code': VERIFIER_BOOK_CODE, 'entries': []}
+    if version != 3:
+        validate_code(header['校验码'], field_lines=header_lines)
+        book['book_code'] = header['校验码']
+    else:
+        book['verifier'] = _parse_verifier(header[VERIFIER_LABEL], header_lines)
     header_profile = {}
     if version == 2:
-        _require_fields(section, header, KDF_FIELDS.keys(), line_number)
         header_profile = {key: _parse_int(label, header, header_lines) for label, key in KDF_FIELDS.items()}
         validate_profile(header_profile, field_lines=header_lines)
         book.update(header_profile)
-    else:
-        for label in KDF_FIELDS:
-            if label in header:
-                raise ValueError(f'{_field(label, header_lines)}只能写在格式 1 的 [条目] 中。')
 
     for section, fields, field_lines, line_number in sections[1:]:
         if section == '[账本]':
@@ -85,7 +94,7 @@ def decode(text, *, line_offset=0, fragment=False):
         if version == 2 and explicit_profile:
             label = min(explicit_profile, key=field_lines.get)
             raise ValueError(f'{_field(label, field_lines)}只能写在格式 2 的 [账本] 中。')
-        if version == 1 and fragment and not explicit_profile:
+        if fragment and not explicit_profile:
             raise ValueError(f'第 {line_number} 行的 [条目] 缺少“内存KiB”和“迭代次数”。请复制包含 [账本] 头的完整源账本。')
         inherited = version == 2
         expected = ENTRY_LABELS - KDF_FIELDS.keys() if inherited else ENTRY_LABELS
@@ -114,15 +123,26 @@ def decode(text, *, line_offset=0, fragment=False):
 
 def encode(book):
     """输出规范文本，不保留注释或额外字段，不改变任何字段值。"""
+    if not isinstance(book, dict) or type(book.get('version')) is not int or book['version'] not in (1, 3):
+        raise ValueError('只能保存格式 1 或格式 3 的账本。')
+    version = book['version']
     expected = {'version', 'book_code', 'entries'}
-    if not isinstance(book, dict) or set(book) != expected:
-        raise ValueError('账本参数必须仅包含 version、book_code、entries。')
-    if type(book['version']) is not int or book['version'] != 1:
-        raise ValueError('只能保存格式 1 的账本。')
+    if version == 3:
+        expected.add('verifier')
+    if set(book) != expected:
+        raise ValueError('账本字段与指定格式不一致。')
     validate_code(book['book_code'])
     if not isinstance(book['entries'], list):
         raise ValueError('entries 必须是列表')
-    lines = ['[账本]', '格式：1', f'校验码：{book["book_code"]}']
+    lines = ['[账本]', f'格式：{version}']
+    if version == 3:
+        if book['book_code'] != VERIFIER_BOOK_CODE:
+            raise ValueError('格式 3 的账本不保存旧校验码。')
+        verifier = book['verifier']
+        validate_verifier(verifier)
+        lines.append(f'{VERIFIER_LABEL}：' + ','.join(str(verifier[key]) for key in VERIFIER_KEYS))
+    else:
+        lines.append(f'校验码：{book["book_code"]}')
     for entry in book['entries']:
         validate_entry(entry)
         lines.extend(('', '[条目]'))
@@ -155,6 +175,22 @@ def _parse_int(label, fields, field_lines):
         return int(fields[label])
     except ValueError:
         raise ValueError(f'{_field(label, field_lines)}的数值过大。') from None
+
+
+def _parse_verifier(value, field_lines):
+    try:
+        parts = value.split(',')
+        if len(parts) != len(VERIFIER_KEYS) or any(not re.fullmatch(r'[0-9]+', part) for part in parts[1:4]):
+            raise ValueError('应依次填写算法、内存KiB、迭代次数、并行通道、随机码和密码密文，以英文逗号分隔。')
+        verifier = dict(zip(VERIFIER_KEYS, parts))
+        try:
+            verifier.update(memory_kib=int(parts[1]), iterations=int(parts[2]), lanes=int(parts[3]))
+        except ValueError:
+            raise ValueError('加密参数的数值过大。') from None
+        validate_verifier(verifier)
+        return verifier
+    except ValueError as error:
+        raise ValueError(f'{_field(VERIFIER_LABEL, field_lines)}无效。{error}') from None
 
 
 def validate_profile(profile, *, field_lines=None):
@@ -197,15 +233,23 @@ def validate_entry(entry, *, field_lines=None):
         raise ValueError('备注必须是字符串')
     if any(not isinstance(entry[key], str) for key in TEXT_FIELDS):
         raise ValueError('服务资料、算法、随机码和密文必须是字符串')
-    if entry['algorithm'] not in ALGORITHMS:
-        raise ValueError(f'{_field("加密算法", field_lines)}指定了不受支持的算法：{entry["algorithm"]}')
     validate_rules(entry['rules'], field_lines=field_lines)
-    if type(entry['lanes']) is not int or not 1 <= entry['lanes'] < 2 ** 24:
+    _validate_cipher_data(entry, field_lines=field_lines)
+
+
+def validate_cipher_settings(record, *, field_lines=None):
+    if record['algorithm'] not in ALGORITHMS:
+        raise ValueError(f'{_field("加密算法", field_lines)}指定了不受支持的算法：{record["algorithm"]}')
+    if type(record['lanes']) is not int or not 1 <= record['lanes'] < 2 ** 24:
         raise ValueError(f'{_field("并行通道", field_lines)}必须是 1 到 {2 ** 24 - 1} 之间的整数。')
-    if type(entry['memory_kib']) is not int or not 8 * entry['lanes'] <= entry['memory_kib'] < 2 ** 32:
+    if type(record['memory_kib']) is not int or not 8 * record['lanes'] <= record['memory_kib'] < 2 ** 32:
         raise ValueError(f'{_field("内存KiB", field_lines)}必须至少为“并行通道”的 8 倍，且小于 {2 ** 32}。')
-    if type(entry['iterations']) is not int or not 1 <= entry['iterations'] < 2 ** 32:
+    if type(record['iterations']) is not int or not 1 <= record['iterations'] < 2 ** 32:
         raise ValueError(f'{_field("迭代次数", field_lines)}必须是 1 到 {2 ** 32 - 1} 之间的整数。')
+
+
+def _validate_cipher_data(entry, *, field_lines=None):
+    validate_cipher_settings(entry, field_lines=field_lines)
     if bool(entry['salt']) != bool(entry['data']):
         raise ValueError(f'{_field("随机码", field_lines)}和{_field("密码密文", field_lines)}必须一起填写。草稿中两者均可留空。')
     if entry['salt']:
@@ -216,6 +260,20 @@ def validate_entry(entry, *, field_lines=None):
             raise ValueError(f'{_field("密码密文", field_lines)}不是有效的 Base64 文本，请检查是否复制完整。') from None
         if b64encode(data).decode('ascii') != entry['data']:
             raise ValueError(f'{_field("密码密文", field_lines)}不是标准的 Base64 文本，请从原账本完整复制。')
+        return data
+    return b''
+
+
+def validate_verifier(verifier):
+    if not isinstance(verifier, dict) or set(verifier) != set(VERIFIER_KEYS):
+        raise ValueError('校验样本字段不完整。')
+    if not isinstance(verifier['salt'], str) or not isinstance(verifier['data'], str):
+        raise ValueError('校验样本的随机码和密码密文必须是文本。')
+    data = _validate_cipher_data(verifier)
+    nonce_length = 24 if verifier['algorithm'] == 'XCHACHA20-POLY1305' else 12
+    if len(data) != nonce_length + 18 + 16:
+        raise ValueError('校验样本的密码密文长度不正确。')
+    return data
 
 
 def _escape(value):

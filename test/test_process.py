@@ -5,7 +5,7 @@ from copy import deepcopy
 from unittest.mock import patch
 import unittest
 
-from core import process, text_process
+from core import create_verifier, process, text_process, verify_master
 
 
 def sample_entry(algorithm='XCHACHA20-POLY1305'):
@@ -19,6 +19,36 @@ def sample_entry(algorithm='XCHACHA20-POLY1305'):
 class ProcessTests(unittest.TestCase):
     book_code = '0123456789abcdef0123456789abcdef'
     master = '测试管理密码 with spaces'
+
+    def test_verifier_checks_only_the_authenticated_empty_sample(self):
+        for algorithm, nonce_length in (('AES-256-GCM', 12), ('CHACHA20-POLY1305', 12), ('XCHACHA20-POLY1305', 24)):
+            with self.subTest(algorithm=algorithm):
+                entry = sample_entry(algorithm)
+                parameters = {'book_code': self.book_code, 'entry': entry}
+                encrypted_entry = process('encrypt', parameters, self.master, '')
+                verifier = create_verifier(self.master, profile=encrypted_entry)
+                self.assertEqual(set(verifier), {'algorithm', 'memory_kib', 'iterations', 'lanes', 'salt', 'data'})
+                self.assertEqual({key: verifier[key] for key in ('algorithm', 'memory_kib', 'iterations', 'lanes')},
+                                 {key: entry[key] for key in ('algorithm', 'memory_kib', 'iterations', 'lanes')})
+                self.assertNotEqual(verifier['salt'], encrypted_entry['salt'])
+                data = b64decode(verifier['data'])
+                self.assertEqual(len(data), nonce_length + 18 + 16)
+                self.assertNotEqual(data[:nonce_length], b64decode(encrypted_entry['data'])[:nonce_length])
+                self.assertTrue(verify_master(verifier, self.master))
+                with self.assertRaisesRegex(ValueError, '管理密码错误'):
+                    verify_master(verifier, self.master + '!')
+                damaged = data[:-1] + bytes([data[-1] ^ 1])
+                with self.assertRaisesRegex(ValueError, '校验样本已被改动'):
+                    verify_master({**verifier, 'data': b64encode(damaged).decode('ascii')}, self.master)
+                with self.assertRaisesRegex(ValueError, '校验样本内容不正确'):
+                    verify_master({key: encrypted_entry[key] for key in verifier}, self.master)
+
+    def test_verifier_uses_config_defaults_when_no_profile_is_supplied(self):
+        with patch.multiple('config', DEFAULT_ALGORITHM='CHACHA20-POLY1305', MEMORY_KIB=32, ITERATIONS=2, LANES=2):
+            verifier = create_verifier(self.master)
+        self.assertEqual((verifier['algorithm'], verifier['memory_kib'], verifier['iterations'], verifier['lanes']),
+                         ('CHACHA20-POLY1305', 32, 2, 2))
+        self.assertTrue(verify_master(verifier, self.master))
 
     def test_shared_pipeline_and_no_input_mutation(self):
         for algorithm in ('AES-256-GCM', 'CHACHA20-POLY1305', 'XCHACHA20-POLY1305'):

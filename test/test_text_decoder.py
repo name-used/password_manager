@@ -1,6 +1,6 @@
 import unittest
 
-from core import text_process
+from core import create_verifier, text_process, verify_master, with_verifier
 from test.test_process import sample_entry
 
 
@@ -125,6 +125,48 @@ class TextDecoderTests(unittest.TestCase):
                 self.assertEqual(text_process('decrypt', result, 1, master), 'source')
         with self.assertRaisesRegex(ValueError, '第 2 行.*完整源账本'):
             text_process('append', '\ufeff\r\n' + provisional[provisional.index('[条目]'):], parameters=target)
+
+    def test_verifier_header_roundtrip_keeps_entry_parameters_and_omits_old_code(self):
+        master = 'synthetic master'
+        verifier = create_verifier(master, profile=self.book['entries'][0])
+        book = with_verifier(self.book, verifier)
+        self.assertEqual(book, {'version': 3, 'book_code': '0' * 32, 'entries': self.book['entries'], 'verifier': verifier})
+        self.assertEqual(self.book['version'], 1)
+        text = text_process('encode', parameters=book)
+        sample_line = f'校验样本：XCHACHA20-POLY1305,32,1,1,{verifier["salt"]},{verifier["data"]}'
+        self.assertEqual(text.splitlines()[:3], ['[账本]', '格式：3', sample_line])
+        self.assertNotIn('校验码：', text)
+        self.assertEqual(text_process('decode', text), book)
+        exact = '\ufeff' + text.replace('\n', '\r\n')
+        self.assertEqual(text_process('portable', exact), (book, exact))
+        self.assertTrue(verify_master(text_process('decode', text)['verifier'], master))
+        encrypted = text_process('encrypt', text, 0, master, 'synthetic site password')
+        self.assertEqual(text_process('decode', encrypted)['verifier'], verifier)
+        self.assertEqual(text_process('decrypt', encrypted, 0, master), 'synthetic site password')
+
+        invalid = (
+            (text.replace(sample_line + '\n', ''), '缺少.*校验样本'),
+            (text.replace(sample_line, '校验样本：invalid'), '第 3 行的“校验样本”'),
+            (text.replace(sample_line, sample_line + '\n校验码：' + self.book['book_code']), '第 4 行的“校验码”'),
+        )
+        for malformed, message in invalid:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                text_process('decode', malformed)
+
+    def test_append_keeps_the_target_verifier_and_the_original_entries(self):
+        master = 'synthetic master'
+        verifier = create_verifier(master, profile=self.book['entries'][0])
+        target = with_verifier({**self.book, 'entries': []}, verifier)
+        self.book['entries'][0].update(memory_kib=48, iterations=2)
+        original = text_process('encode', parameters=self.book)
+        encrypted = text_process('encrypt', original, 0, master, 'original')
+        source = text_process('decode', encrypted)
+        v3_source = text_process('encode', parameters=with_verifier(source, create_verifier('other master', profile=source['entries'][0])))
+        fragment = encrypted[encrypted.index('[条目]'):]
+        for pasted in (encrypted, fragment, self._provisional_text(encrypted), v3_source):
+            merged = text_process('append', pasted, parameters=target)
+            self.assertEqual(text_process('decode', merged), {**target, 'entries': source['entries']})
+            self.assertEqual(text_process('decrypt', merged, 0, master), 'original')
 
     def _provisional_text(self, format_one_text):
         return (format_one_text.replace('内存KiB：48\n迭代次数：2\n', '')

@@ -9,9 +9,16 @@ from base64 import b64decode, b64encode
 from secrets import choice, token_bytes
 from string import ascii_lowercase, ascii_uppercase, digits
 
+import config
+
 from . import argon2id_native as argon2id
 from .ciphers import aes_gcm, chacha20_poly1305, xchacha20_poly1305
-from .text_decoder import validate_code, validate_entry, validate_rules, validate_salt
+from .text_decoder import (
+    VERIFIER_KEYS, validate_cipher_settings, validate_code, validate_entry, validate_rules, validate_salt, validate_verifier,
+)
+
+
+_VERIFIER_PLAINTEXT = b'LOCALVAULT-CHECK\x00\x00'
 
 
 def process(action, parameters, master='', password=None):
@@ -43,13 +50,7 @@ def process(action, parameters, master='', password=None):
     if not isinstance(master, str) or not master:
         raise ValueError('请输入管理密码。')
 
-    # 只在这个边界选择算法，三个算法接受相同的 key / nonce / data 接口。
-    if entry['algorithm'] == 'AES-256-GCM':
-        cipher, nonce_length = aes_gcm, 12
-    elif entry['algorithm'] == 'CHACHA20-POLY1305':
-        cipher, nonce_length = chacha20_poly1305, 12
-    else:
-        cipher, nonce_length = xchacha20_poly1305, 24
+    cipher, nonce_length = _cipher(entry['algorithm'])
 
     if action == 'encrypt':
         if not isinstance(password, str):
@@ -76,7 +77,7 @@ def process(action, parameters, master='', password=None):
             raise ValueError('“密码密文”的长度不符合账本格式，请检查该字段是否完整。')
         nonce, data = data[:nonce_length], data[nonce_length:]
 
-    key = argon2id.derive(master.encode('utf-8'), salt, entry['memory_kib'], entry['iterations'], entry['lanes'], length=32)
+    key = _derive(master, salt, entry)
     if action == 'encrypt':
         data = nonce + cipher.encrypt(key, nonce, plaintext)
         return {**entry, 'rules': entry['rules'].copy(), 'salt': salt_text, 'data': b64encode(data).decode('ascii')}
@@ -92,3 +93,47 @@ def process(action, parameters, master='', password=None):
         return plaintext[18:].decode('utf-8')
     except UnicodeDecodeError:
         raise ValueError('解密后的密码无法按 UTF-8 读取。') from None
+
+
+def create_verifier(master, *, profile=None):
+    if not isinstance(master, str) or not master:
+        raise ValueError('请输入管理密码。')
+    if profile is None:
+        profile = dict(algorithm=config.DEFAULT_ALGORITHM, memory_kib=config.MEMORY_KIB, iterations=config.ITERATIONS, lanes=config.LANES)
+    settings = VERIFIER_KEYS[:4]
+    if not isinstance(profile, dict) or not set(settings) <= profile.keys():
+        raise ValueError('校验样本缺少加密设置。')
+    verifier = {key: profile[key] for key in settings}
+    validate_cipher_settings(verifier)
+    cipher, nonce_length = _cipher(verifier['algorithm'])
+    salt, nonce = token_bytes(16), token_bytes(nonce_length)
+    key = _derive(master, salt, verifier)
+    data = nonce + cipher.encrypt(key, nonce, _VERIFIER_PLAINTEXT)
+    return {**verifier, 'salt': salt.hex(), 'data': b64encode(data).decode('ascii')}
+
+
+def verify_master(verifier, master):
+    if not isinstance(master, str) or not master:
+        raise ValueError('请输入管理密码。')
+    data = validate_verifier(verifier)
+    cipher, nonce_length = _cipher(verifier['algorithm'])
+    key = _derive(master, bytes.fromhex(verifier['salt']), verifier)
+    try:
+        plaintext = cipher.decrypt(key, data[:nonce_length], data[nonce_length:])
+    except ValueError:
+        raise ValueError('管理密码错误，或账本的校验样本已被改动。') from None
+    if plaintext != _VERIFIER_PLAINTEXT:
+        raise ValueError('账本的校验样本内容不正确。')
+    return True
+
+
+def _cipher(algorithm):
+    if algorithm == 'AES-256-GCM':
+        return aes_gcm, 12
+    if algorithm == 'CHACHA20-POLY1305':
+        return chacha20_poly1305, 12
+    return xchacha20_poly1305, 24
+
+
+def _derive(master, salt, record):
+    return argon2id.derive(master.encode('utf-8'), salt, record['memory_kib'], record['iterations'], record['lanes'], length=32)

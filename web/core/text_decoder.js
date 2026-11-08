@@ -13,6 +13,7 @@ globalThis.VaultText = (() => {
     const sharedEntryLabels = entryLabels.filter(label => !sharedLabels.includes(label));
     const bookLabels = ['格式', '校验码'];
     const sharedBookLabels = [...bookLabels, ...sharedLabels];
+    const verifierBookLabels = ['格式', '校验样本'];
     const entryKeys = [...Object.values(fields), 'rules'];
     const textKeys = ['service', 'addresses', 'code', 'username', 'nickname', 'algorithm', 'salt', 'data'];
     const algorithms = ['AES-256-GCM', 'CHACHA20-POLY1305', 'XCHACHA20-POLY1305'];
@@ -34,7 +35,7 @@ globalThis.VaultText = (() => {
             const separator = line.indexOf('：');
             if (separator < 0) throw new Error(`第 ${index + 1} 行缺少中文冒号（：）。请用中文冒号分隔字段名和内容。`);
             const label = line.slice(0, separator);
-            const allowed = current.type === '[账本]' ? sharedBookLabels : [...entryLabels, '备注'];
+            const allowed = current.type === '[账本]' ? [...sharedBookLabels, '校验样本'] : [...entryLabels, '备注'];
             if (!allowed.includes(label)) throw new Error(`第 ${index + 1} 行有无法识别的字段“${label}”。`);
             if (current.fields.has(label)) throw new Error(`第 ${index + 1} 行的字段“${label}”重复。`);
             try {
@@ -47,21 +48,27 @@ globalThis.VaultText = (() => {
             throw new Error('账本应以 [账本] 段开头，全文只能有一个 [账本] 段。请检查账本内容是否完整。');
         }
         const format = sections[0].fields.get('格式');
-        if (format !== undefined && format !== '1' && format !== '2') throw new Error('此查看器只支持格式 1 和格式 2 的账本。');
+        if (format !== undefined && !['1', '2', '3'].includes(format)) throw new Error('此查看器只支持格式 1、2 和 3 的账本。');
         const shared = format === '2';
-        const book = {version: shared ? 2 : 1, book_code: '', entries: []};
+        const headerLabels = format === '3' ? verifierBookLabels : shared ? sharedBookLabels : bookLabels;
+        const book = {version: Number(format ?? 1), book_code: '', entries: []};
         for (const section of sections) {
             const values = section.fields;
             const isHeader = section.type === '[账本]';
-            const expected = isHeader ? (shared ? sharedBookLabels : bookLabels) : (shared ? sharedEntryLabels : entryLabels);
+            const expected = isHeader ? headerLabels : shared ? sharedEntryLabels : entryLabels;
             const missing = expected.filter(label => !values.has(label));
             if (missing.length) throw new Error(`从第 ${section.line} 行开始的段落缺少字段 ${missing.map(label => `“${label}”`).join('、')}。`);
             const misplaced = [...values.keys()].find(label => !expected.includes(label) && label !== '备注');
             if (misplaced) throw new Error(`格式 ${book.version} 的 ${section.type} 段不能包含“${misplaced}”字段。请检查第 ${section.line} 行。`);
             try {
                 if (isHeader) {
-                    book.book_code = values.get('校验码');
-                    validateCode(book.book_code);
+                    if (book.version === 3) {
+                        book.book_code = '0'.repeat(32);
+                        book.verifier = readVerifier(values.get('校验样本'));
+                    } else {
+                        book.book_code = values.get('校验码');
+                        validateCode(book.book_code);
+                    }
                     if (shared) {
                         for (const [label, key] of Object.entries(sharedNumberFields)) book[key] = readNumber(label, values.get(label));
                         validateCosts(book.memory_kib, book.iterations);
@@ -107,6 +114,39 @@ globalThis.VaultText = (() => {
         if (!Number.isInteger(iterations) || iterations < 1 || iterations >= 2 ** 32) throw new Error('“迭代次数”必须是 1 到 4294967295 之间的整数。');
     }
 
+    function validateEncryptionParameters({algorithm, memory_kib, iterations, lanes}) {
+        if (!algorithms.includes(algorithm)) throw new Error(`此查看器不支持加密算法“${algorithm}”。`);
+        if (!Number.isInteger(lanes) || lanes < 1 || lanes >= 2 ** 24) throw new Error('“并行通道”必须是 1 到 16777215 之间的整数。');
+        validateCosts(memory_kib, iterations, lanes);
+    }
+
+    function validateSalt(value) {
+        if (typeof value !== 'string' || value.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(value)) {
+            throw new Error('“随机码”必须是 32 个十六进制字符（0–9、A–F，不区分大小写）。');
+        }
+    }
+
+    function readVerifier(value) {
+        const parts = value.split(',');
+        if (parts.length !== 6) throw new Error('“校验样本”应包含算法、内存、迭代次数、并行通道、随机码和密文。');
+        const [algorithm, memory, iterations, lanes, salt, data] = parts;
+        const verifier = {algorithm, memory_kib: readNumber('内存KiB', memory), iterations: readNumber('迭代次数', iterations),
+                          lanes: readNumber('并行通道', lanes), salt, data};
+        validateVerifier(verifier);
+        return verifier;
+    }
+
+    function validateVerifier(verifier) {
+        if (!verifier || Object.keys(verifier).length !== 6 ||
+            ['algorithm', 'memory_kib', 'iterations', 'lanes', 'salt', 'data'].some(key => !Object.prototype.hasOwnProperty.call(verifier, key))) {
+            throw new Error('“校验样本”缺少所需字段。');
+        }
+        validateEncryptionParameters(verifier);
+        validateSalt(verifier.salt);
+        const nonceLength = verifier.algorithm === 'XCHACHA20-POLY1305' ? 24 : 12;
+        if (base64Bytes(verifier.data).length !== nonceLength + 34) throw new Error('“校验样本”的密文长度不正确。');
+    }
+
     function validateEntry(entry) {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entryKeys.some(key => !Object.prototype.hasOwnProperty.call(entry, key)) ||
             Object.keys(entry).some(key => !entryKeys.includes(key) && key !== 'notes')) {
@@ -115,7 +155,7 @@ globalThis.VaultText = (() => {
         if (textKeys.some(key => typeof entry[key] !== 'string') || (Object.prototype.hasOwnProperty.call(entry, 'notes') && typeof entry.notes !== 'string')) {
             throw new Error('服务资料、备注、加密算法、随机码和密码密文都应填写为文本。');
         }
-        if (!algorithms.includes(entry.algorithm)) throw new Error(`此查看器不支持加密算法“${entry.algorithm}”。`);
+        validateEncryptionParameters(entry);
         const rules = entry.rules;
         if (!rules || typeof rules !== 'object' || Array.isArray(rules) || Object.keys(rules).length !== 4 ||
             ['length', 'categories', 'allowed', 'symbols'].some(key => !Object.prototype.hasOwnProperty.call(rules, key))) {
@@ -134,11 +174,9 @@ globalThis.VaultText = (() => {
         if (new Set(rules.symbols).size !== rules.symbols.length || (rules.allowed.includes('S') && !rules.symbols)) {
             throw new Error('可用符号不能重复。启用符号类型时，至少填写一个可用符号。');
         }
-        if (!Number.isInteger(entry.lanes) || entry.lanes < 1 || entry.lanes >= 2 ** 24) throw new Error('“并行通道”必须是 1 到 16777215 之间的整数。');
-        validateCosts(entry.memory_kib, entry.iterations, entry.lanes);
         if (Boolean(entry.salt) !== Boolean(entry.data)) throw new Error('已加密条目需要同时填写随机码和密码密文。未加密条目的这两个字段都应留空。');
         if (entry.salt) {
-            if (entry.salt.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(entry.salt)) throw new Error('“随机码”必须是 32 个十六进制字符（0–9、A–F，不区分大小写）。');
+            validateSalt(entry.salt);
             base64Bytes(entry.data);
         }
     }
@@ -169,7 +207,7 @@ globalThis.VaultText = (() => {
         return result;
     }
 
-    return {decode, validateCode, validateEntry, base64Bytes};
+    return {decode, validateCode, validateEntry, validateVerifier, base64Bytes};
 })();
 
 if (typeof module !== 'undefined') module.exports = globalThis.VaultText;

@@ -1,9 +1,10 @@
 'use strict';
 
-const viewer = {book: null, index: null, loadedText: '', fileBytes: null, busy: false, plaintext: null, masterFixed: false};
+const viewer = {book: null, index: null, loadedText: '', fileBytes: null, busy: false, plaintext: null, verified: false};
 const ui = Object.fromEntries(['source-panel', 'source', 'load', 'open', 'save-book', 'clear-book', 'file', 'search', 'count', 'entries', 'no-selection',
-    'detail', 'detail-title', 'detail-user', 'entry-state', 'metadata', 'crypto-info', 'master', 'show-master', 'decrypt', 'plaintext',
-    'plaintext-state', 'show-password', 'copy-password', 'lock', 'master-state', 'status'].map(id => [id, document.getElementById(id)]));
+    'detail', 'detail-title', 'detail-user', 'entry-state', 'public-details', 'metadata', 'crypto-info', 'master-panel', 'master-form', 'master',
+    'show-master', 'verify', 'change-master', 'plaintext', 'plaintext-state', 'show-password', 'copy-password', 'retry', 'master-state',
+    'status'].map(id => [id, document.getElementById(id)]));
 
 function showStatus(message, error = false) {
     ui.status.textContent = message;
@@ -21,7 +22,7 @@ function clearPlaintext(clearMaster = false) {
     renderPlaintext();
     ui['plaintext-state'].textContent = '未解密';
     if (clearMaster) {
-        viewer.masterFixed = false;
+        viewer.verified = false;
         ui.master.value = '';
         ui.master.type = 'password';
         ui['show-master'].checked = false;
@@ -30,19 +31,31 @@ function clearPlaintext(clearMaster = false) {
 }
 
 function refreshControls() {
-    for (const name of ['source', 'load', 'open', 'clear-book', 'file', 'master', 'show-master', 'lock']) ui[name].disabled = viewer.busy;
-    ui.master.disabled = viewer.busy || !viewer.book || ui.source.value !== viewer.loadedText;
-    ui['save-book'].disabled = ui.master.disabled;
-    ui.master.readOnly = viewer.masterFixed;
+    const loaded = viewer.book && ui.source.value === viewer.loadedText;
+    for (const name of ['source', 'load', 'open', 'clear-book', 'file', 'change-master', 'retry']) ui[name].disabled = viewer.busy;
+    ui.master.disabled = viewer.busy || !loaded;
+    ui['save-book'].disabled = viewer.busy || !loaded;
+    ui['master-panel'].hidden = viewer.verified && Boolean(viewer.book?.verifier);
+    ui['master-form'].hidden = viewer.verified;
     ui['show-master'].disabled = ui.master.disabled;
-    ui['master-state'].textContent = viewer.masterFixed ? '已保留管理密码。要换用其他密码，请先锁定账本。'
-        : '首次解密成功后会保留管理密码。要换用其他密码，请先锁定账本。';
-    ui.search.disabled = viewer.busy || !viewer.book;
-    const entry = viewer.book && viewer.index !== null ? viewer.book.entries[viewer.index] : null;
-    ui.decrypt.disabled = viewer.busy || !entry || !entry.data || ui.source.value !== viewer.loadedText;
+    ui.verify.disabled = ui.master.disabled || viewer.verified || !ui.master.value || !verificationSample();
+    ui['change-master'].hidden = !viewer.verified || Boolean(viewer.book?.verifier);
+    ui['master-state'].textContent = viewer.verified ? '管理密码已验证。' : '';
+    ui.search.disabled = viewer.busy || !loaded;
     ui['show-password'].disabled = viewer.busy || !viewer.plaintext;
     ui['copy-password'].disabled = viewer.busy || viewer.plaintext === null;
-    for (const button of ui.entries.querySelectorAll('button')) button.disabled = viewer.busy;
+    ui.retry.hidden = !loaded || !viewer.verified || !selectedEntry()?.data || viewer.plaintext !== null;
+    for (const button of ui.entries.querySelectorAll('button')) button.disabled = viewer.busy || !loaded;
+}
+
+function selectedEntry() {
+    return viewer.book && viewer.index !== null ? viewer.book.entries[viewer.index] : null;
+}
+
+function verificationSample() {
+    if (!viewer.book) return null;
+    const entry = selectedEntry();
+    return viewer.book.verifier ?? (entry?.data ? entry : viewer.book.entries.find(item => item.data));
 }
 
 function renderEntries() {
@@ -83,7 +96,7 @@ function renderEntries() {
 }
 
 function selectEntry(index) {
-    if (viewer.busy) return;
+    if (viewer.busy || ui.source.value !== viewer.loadedText) return;
     viewer.index = index;
     clearPlaintext();
     const entry = viewer.book.entries[index];
@@ -92,6 +105,7 @@ function selectEntry(index) {
     ui['detail-title'].textContent = entry.service || '未命名服务';
     ui['detail-user'].textContent = entry.username || '未填写用户名';
     ui['entry-state'].textContent = entry.data ? '已加密' : '未加密';
+    ui['public-details'].open = false;
     ui.metadata.replaceChildren();
     const groups = {U: '大写字母', L: '小写字母', D: '数字', S: '符号'};
     const rules = `至少 ${entry.rules.length} 个字符，包含下列字符类型中的至少 ${entry.rules.categories} 种（${Array.from(entry.rules.allowed, item => groups[item]).join('、')}）`;
@@ -104,8 +118,9 @@ function selectEntry(index) {
     }
     ui['crypto-info'].textContent = `加密算法 ${entry.algorithm} · 内存 ${entry.memory_kib / 1024} MiB · 迭代 ${entry.iterations} 轮 · 并行通道 ${entry.lanes}`;
     renderEntries();
-    showStatus(entry.data ? (ui.master.value ? '点击“解密密码”查看这条的密码。'
-        : '输入管理密码，再点击“解密密码”。') : '这条还没有加密密码。请在桌面管理端保存条目密码。');
+    if (!entry.data) return showStatus('这条还没有加密密码。请在桌面管理端保存条目密码。');
+    if (viewer.verified) return decryptSelected();
+    showStatus('输入管理密码并验证后，即可解密所选条目。');
 }
 
 function loadBook(fileBytes = null, errorLabel = '无法读取粘贴内容') {
@@ -122,7 +137,7 @@ function loadBook(fileBytes = null, errorLabel = '无法读取粘贴内容') {
         ui['no-selection'].hidden = false;
         ui['source-panel'].open = false;
         renderEntries();
-        showStatus(book.entries.length ? `已读取 ${book.entries.length} 个条目。请选择要查看的条目。` : '已读取账本。账本中没有条目。');
+        showStatus(verificationSample() ? '已读取账本。请输入管理密码。' : '已读取账本。没有可用于验证管理密码的已加密条目。');
     } catch (error) {
         showStatus(`${errorLabel}。${error.message}`, true);
         refreshControls();
@@ -143,29 +158,64 @@ function saveBook() {
     showStatus('已发起下载。请在浏览器的下载列表中查看“账本.txt”。');
 }
 
-async function decryptSelected() {
-    if (viewer.busy || viewer.index === null || !viewer.book) return;
-    if (ui.source.value !== viewer.loadedText) return showStatus('粘贴内容已更改，请先点击“读取粘贴内容”。', true);
-    clearPlaintext();
-    const entry = viewer.book.entries[viewer.index];
-    if (!ui.master.value) return showStatus('请输入管理密码。', true);
-    if (entry.memory_kib > 65536 || entry.iterations > 3 || entry.lanes > 4) {
-        if (!confirm('这个条目的解密参数较高，可能耗时较长或占用更多内存。继续解密吗？')) return;
+function confirmCost({memory_kib, iterations, lanes}) {
+    return (memory_kib <= 65536 && iterations <= 3 && lanes <= 4) || confirm('此次计算的参数较高，可能耗时较长或占用更多内存。继续吗？');
+}
+
+function showDecrypted(password, start) {
+    viewer.plaintext = password;
+    renderPlaintext();
+    ui['plaintext-state'].textContent = password ? '已解密' : '已解密（密码为空）';
+    showStatus(`解密成功，用时 ${((performance.now() - start) / 1000).toFixed(3)} 秒。`);
+}
+
+async function verifyMaster() {
+    if (ui.verify.disabled) return;
+    const {book} = viewer;
+    const entry = selectedEntry();
+    const sample = verificationSample();
+    const master = ui.master.value;
+    if (!confirmCost(sample)) return;
+    viewer.busy = true;
+    refreshControls();
+    showStatus('正在验证管理密码。');
+    try {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const start = performance.now();
+        const result = book.verifier ? await VaultProcess.verify(sample, master) : await VaultProcess.decrypt(book.book_code, sample, master);
+        if (viewer.book !== book || ui.source.value !== viewer.loadedText || ui.master.value !== master) return;
+        viewer.verified = true;
+        if (!book.verifier && sample === entry) showDecrypted(result, start);
+        else showStatus('管理密码已验证。选择条目即可解密。');
+    } catch (error) {
+        showStatus(`管理密码验证失败。${error.message}`, true);
+    } finally {
+        viewer.busy = false;
+        refreshControls();
     }
+    if (viewer.verified && book.verifier && entry?.data) await decryptSelected();
+}
+
+async function decryptSelected() {
+    const entry = selectedEntry();
+    if (viewer.busy || !viewer.verified || !entry?.data || ui.source.value !== viewer.loadedText) return;
+    const {book} = viewer;
+    const master = ui.master.value;
+    if (!confirmCost(entry)) return;
     viewer.busy = true;
     refreshControls();
     showStatus(`正在解密“${entry.service || '未命名服务'}”的密码。`);
     try {
         await new Promise(resolve => setTimeout(resolve, 0));
         const start = performance.now();
-        const password = await VaultProcess.decrypt(viewer.book.book_code, entry, ui.master.value);
-        viewer.masterFixed = true;
-        viewer.plaintext = password;
-        renderPlaintext();
-        ui['plaintext-state'].textContent = password ? '已解密' : '已解密（密码为空）';
-        showStatus(`解密成功，用时 ${((performance.now() - start) / 1000).toFixed(3)} 秒。`);
+        const password = await VaultProcess.decrypt(book.book_code, entry, master);
+        if (viewer.verified && viewer.book === book && ui.source.value === viewer.loadedText && ui.master.value === master) showDecrypted(password, start);
     } catch (error) {
-        showStatus(`无法解密条目密码。${error.message}`, true);
+        if (error.code === 'AUTHENTICATION_FAILED') {
+            showStatus('条目校验失败。密码密文、随机码或加密参数可能已改动，或这条使用了其他管理密码。', true);
+        } else {
+            showStatus(`无法解密条目密码。${error.message}`, true);
+        }
     } finally {
         viewer.busy = false;
         refreshControls();
@@ -196,13 +246,22 @@ ui.source.addEventListener('input', () => {
     if (viewer.book && ui.source.value !== viewer.loadedText) showStatus('粘贴内容已更改，请重新读取。');
 });
 ui.search.addEventListener('input', renderEntries);
-ui.decrypt.addEventListener('click', decryptSelected);
-ui.master.addEventListener('keydown', event => {if (event.key === 'Enter' && !ui.decrypt.disabled) decryptSelected();});
-ui.master.addEventListener('input', () => clearPlaintext());
+ui.verify.addEventListener('click', verifyMaster);
+ui.master.addEventListener('keydown', event => {if (event.key === 'Enter') verifyMaster();});
+ui.master.addEventListener('input', () => {
+    viewer.verified = false;
+    clearPlaintext();
+});
 ui['show-master'].addEventListener('change', () => {ui.master.type = ui['show-master'].checked ? 'text' : 'password';});
 ui['show-password'].addEventListener('change', renderPlaintext);
 ui['copy-password'].addEventListener('click', copyPassword);
-ui.lock.addEventListener('click', () => {clearPlaintext(true); showStatus('已锁定账本。管理密码和解密结果已清空。');});
+ui.retry.addEventListener('click', decryptSelected);
+ui['change-master'].addEventListener('click', () => {
+    if (viewer.busy) return;
+    clearPlaintext(true);
+    ui.master.focus();
+    showStatus('请输入该条目使用的管理密码。');
+});
 ui.open.addEventListener('click', () => ui.file.click());
 ui.file.addEventListener('change', async () => {
     const file = ui.file.files[0];

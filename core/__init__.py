@@ -2,11 +2,16 @@
 
 from secrets import token_hex
 
-from .process import process
+from .process import create_verifier, process, verify_master
 from . import text_decoder
 
 
-__all__ = ['process', 'text_process']
+__all__ = ['create_verifier', 'process', 'text_process', 'verify_master', 'with_verifier']
+
+
+def with_verifier(book, verifier):
+    text_decoder.validate_verifier(verifier)
+    return {'version': 3, 'book_code': text_decoder.VERIFIER_BOOK_CODE, 'verifier': verifier.copy(), 'entries': book['entries']}
 
 
 def text_process(action, text='', index=None, master='', password=None, parameters=None):
@@ -14,7 +19,7 @@ def text_process(action, text='', index=None, master='', password=None, paramete
 
     encrypt / decrypt 使用 text + index；encrypt 返回更新后的文本，decrypt 返回明文。
     new 返回新空账本文本。decode 返回逐条保存参数的账本结构。
-    portable 返回该账本结构和待保存文本，格式 1 原样保留，格式 2 展开成格式 1。
+    portable 返回该账本结构和待保存文本，格式 1 和 3 原样保留，格式 2 展开成格式 1。
     所有操作均不读写文件。
     """
     if action == 'new':
@@ -23,7 +28,7 @@ def text_process(action, text='', index=None, master='', password=None, paramete
         source = text_decoder.decode(text)
         book = _portable_book(source)
         if action == 'portable':
-            return book, text if source['version'] == 1 else text_decoder.encode(book)
+            return book, text_decoder.encode(book) if source['version'] == 2 else text
         return book
     if action == 'encode':
         return text_decoder.encode(parameters)
@@ -53,4 +58,6 @@ def text_process(action, text='', index=None, master='', password=None, paramete
 
 
 def _portable_book(book):
-    return {'version': 1, 'book_code': book['book_code'], 'entries': book['entries']}
+    if book['version'] == 2:
+        return {'version': 1, 'book_code': book['book_code'], 'entries': book['entries']}
+    return book
